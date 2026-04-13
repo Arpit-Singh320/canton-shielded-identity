@@ -1,0 +1,53 @@
+# Daml / Canton / DPM
+.daml/
+.dpm/
+*.dar
+dist/
+daml.log
+
+# Node.js / TypeScript
+node_modules/
+.env
+.env.*
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Rust / Cargo (often used for ZK provers)
+target/
+Cargo.lock
+
+# ZK Proof / Circom build artifacts
+*.r1cs
+*.sym
+*.wasm
+*.zkey
+*.ptau
+witness.wtns
+verification_key.json
+*.vkey.json
+proof.json
+public.json
+circuits/main_js/
+circuits/*.c
+circuits/*.cpp
+rapidsnark/
+
+# IDE and editor configuration
+.idea/
+.vscode/
+*.sublime-project
+*.sublime-workspace
+*.iml
+
+# OS-generated files
+.DS_Store
+Thumbs.db
+
+# Misc temp files
+*~
+*.swp
+*.swo
+*.bak
+*.tmp
