@@ -1,0 +1,90 @@
+-- Copyright (c) 2024 Digital Asset (Switzerland) GmbH and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+module Identity.IssuerRegistry where
+
+import DA.Set (Set)
+import DA.Set qualified as Set
+
+-- | A registry of trusted parties who are authorized to issue KYC credentials.
+--
+-- This template serves as a central, on-ledger source of truth for which
+-- entities (e.g., banks, financial institutions) are permitted to issue
+-- `KYCCredential` contracts. The registry is managed by a `foundation` party,
+-- which represents a governing body or consortium responsible for vetting and
+-- approving issuers.
+--
+-- The contract is keyed by the `foundation`, ensuring that there is only one
+-- active registry per foundation party on the ledger.
+template IssuerRegistry
+  with
+    foundation : Party
+      -- ^ The governing body that manages the list of approved issuers.
+    issuers : Set Party
+      -- ^ The set of parties authorized to issue KYC credentials.
+    observers : Set Party
+      -- ^ Parties who can view the registry, e.g., dApps that need to verify issuers.
+  where
+    signatory foundation
+    observer observers
+
+    key foundation : Party
+    maintainer key.foundation
+
+    -- | Non-consuming choice to check if a given party is a registered issuer.
+    --
+    -- This allows any observer of the registry to efficiently verify an issuer's
+    -- status without needing to fetch and parse the entire contract state.
+    nonconsuming choice IsRegisteredIssuer : Bool
+      with
+        issuerToVerify : Party
+          -- ^ The party to check for registration.
+      controller observers
+      do
+        return $ Set.member issuerToVerify issuers
+
+    -- | Add a new party to the set of authorized issuers.
+    --
+    -- Only the `foundation` can perform this action. The choice archives the
+    -- current registry contract and creates a new one with the updated issuer set.
+    choice AddIssuer : ContractId IssuerRegistry
+      with
+        newIssuer : Party
+          -- ^ The party to be added as a credential issuer.
+      controller foundation
+      do
+        -- Ensure the party is not already a registered issuer to prevent duplicates.
+        assertMsg ("Issuer " <> show newIssuer <> " is already registered.") $
+          not $ Set.member newIssuer issuers
+
+        create this with
+          issuers = Set.insert newIssuer this.issuers
+
+    -- | Remove a party from the set of authorized issuers.
+    --
+    -- This might be done if an issuer no longer meets the required standards or
+    -- voluntarily leaves the network. Only the `foundation` can perform this action.
+    choice RemoveIssuer : ContractId IssuerRegistry
+      with
+        issuerToRemove : Party
+          -- ^ The party to be removed from the list of issuers.
+      controller foundation
+      do
+        -- Ensure the party is currently a registered issuer.
+        assertMsg ("Issuer " <> show issuerToRemove <> " is not registered.") $
+          Set.member issuerToRemove issuers
+
+        create this with
+          issuers = Set.delete issuerToRemove this.issuers
+
+    -- | Allows the foundation to update the set of observers for this registry.
+    --
+    -- This is useful for granting or revoking access to dApps that need to
+    -- consult the registry to validate KYC credential issuers.
+    choice SetObservers : ContractId IssuerRegistry
+      with
+        newObservers : Set Party
+          -- ^ The new, complete set of observers.
+      controller foundation
+      do
+        create this with observers = newObservers
