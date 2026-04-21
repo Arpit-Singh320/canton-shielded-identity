@@ -1,0 +1,219 @@
+-- Copyright (c) 2024 Digital Asset (Switzerland) GmbH and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+module IdentityTest where
+
+import Daml.Script
+import DA.Date as Date
+import DA.Time as Time
+import DA.Set (singleton)
+import DA.Assert
+
+import Identity.KYCCredential
+import Identity.CredentialProof
+import Identity.IssuerRegistry
+import Identity.VerificationRequest
+import Identity.Revocation
+
+-- | This script tests the full lifecycle of a KYC credential:
+-- 1. A registered bank issues a valid credential to a user.
+-- 2. A dApp requests verification, and the user successfully provides a proof.
+-- 3. A verification request fails if the credential has expired.
+-- 4. A verification request fails if the credential issuer is not in the registry.
+-- 5. An issuer can revoke a credential, preventing its future use.
+-- 6. A proof cannot be reused for a different verification request (nonce check).
+identityLifecycleTests : Script ()
+identityLifecycleTests = script do
+  -- Parties
+  operator <- allocatePartyWithHint "Operator" (PartyIdHint "Operator")
+  bank <- allocatePartyWithHint "Bank" (PartyIdHint "Bank")
+  alice <- allocatePartyWithHint "Alice" (PartyIdHint "Alice")
+  dapp <- allocatePartyWithHint "DApp" (PartyIdHint "DApp")
+
+  -- Time
+  now <- getTime
+  let today = Date.toDateUTC now
+  let futureExpiry = Date.addYears 1 today
+  let pastExpiry = Date.addDays (-1) today
+
+  -- Setup: Operator creates the registry and adds the bank as a valid issuer.
+  registryCid <- submit operator do
+    createCmd IssuerRegistry with
+      operator
+      issuers = singleton bank
+
+  -- =================================================================================
+  -- Test 1: Happy Path - Issue, Request, Prove, Verify
+  -- =================================================================================
+  test "Happy Path: Issue, Verify, and Accept" do
+    -- 1. Issuer (Bank) creates a KYC credential for the Owner (Alice).
+    kycCid <- submit bank do
+      createCmd KYCCredential with
+        issuer = bank
+        owner = alice
+        expiryDate = futureExpiry
+        credentialDataHash = "HASH_HAPPY_PATH"
+
+    -- 2. Verifier (DApp) creates a request for Alice to prove her KYC status.
+    requestCid <- submit dapp do
+      createCmd VerificationRequest with
+        verifier = dapp
+        owner = alice
+        nonce = "NONCE_HAPPY_PATH"
+        registryCid
+
+    -- 3. Owner (Alice) sees the request and generates a proof from her credential.
+    (proofCid, _) <- submit alice do
+      exerciseCmd kycCid GenerateProof with
+        viewers = [dapp]
+        nonce = "NONCE_HAPPY_PATH"
+
+    -- 4. Owner (Alice) provides the proof to satisfy the DApp's request.
+    --    This choice consumes the request and the proof, and creates a VerifiedIdentity.
+    verifiedIdentityCid <- submit alice do
+      exerciseCmd requestCid ProvideProof with proofCid
+
+    -- 5. Assert that a VerifiedIdentity contract now exists for the DApp and Alice.
+    verifiedIdentity <- fetch verifiedIdentityCid
+    verifiedIdentity.verifier === dapp
+    verifiedIdentity.owner === alice
+    verifiedIdentity.issuer === bank
+    verifiedIdentity.credentialDataHash === "HASH_HAPPY_PATH"
+    pure ()
+
+  -- =================================================================================
+  -- Test 2: Rejection due to an expired credential
+  -- =================================================================================
+  test "Rejection: Expired Credential" do
+    -- 1. Bank issues an already-expired credential to Alice.
+    expiredKycCid <- submit bank do
+      createCmd KYCCredential with
+        issuer = bank
+        owner = alice
+        expiryDate = pastExpiry
+        credentialDataHash = "HASH_EXPIRED"
+
+    -- 2. DApp sends a verification request.
+    requestCid <- submit dapp do
+      createCmd VerificationRequest with
+        verifier = dapp
+        owner = alice
+        nonce = "NONCE_EXPIRED"
+        registryCid
+
+    -- 3. Alice generates a proof. This is allowed, but the proof will be invalid.
+    (proofCid, _) <- submit alice do
+      exerciseCmd expiredKycCid GenerateProof with
+        viewers = [dapp]
+        nonce = "NONCE_EXPIRED"
+
+    -- 4. Alice attempts to provide the proof. This must fail because the credential's
+    --    expiryDate is in the past. The `ProvideProof` choice should check this.
+    submitMustFail alice do
+      exerciseCmd requestCid ProvideProof with proofCid
+
+  -- =================================================================================
+  -- Test 3: Rejection due to an unregistered issuer
+  -- =================================================================================
+  test "Rejection: Unregistered Issuer" do
+    unregisteredBank <- allocatePartyWithHint "UnregisteredBank" (PartyIdHint "UnregisteredBank")
+
+    -- 1. An unregistered bank issues a credential to Alice.
+    unregisteredKycCid <- submit unregisteredBank do
+      createCmd KYCCredential with
+        issuer = unregisteredBank
+        owner = alice
+        expiryDate = futureExpiry
+        credentialDataHash = "HASH_UNREGISTERED"
+
+    -- 2. DApp sends a verification request.
+    requestCid <- submit dapp do
+      createCmd VerificationRequest with
+        verifier = dapp
+        owner = alice
+        nonce = "NONCE_UNREGISTERED"
+        registryCid
+
+    -- 3. Alice generates a proof.
+    (proofCid, _) <- submit alice do
+      exerciseCmd unregisteredKycCid GenerateProof with
+        viewers = [dapp]
+        nonce = "NONCE_UNREGISTERED"
+
+    -- 4. Alice attempts to provide the proof. This must fail because the issuer
+    --    is not listed in the trusted IssuerRegistry.
+    submitMustFail alice do
+      exerciseCmd requestCid ProvideProof with proofCid
+
+  -- =================================================================================
+  -- Test 4: Credential Revocation
+  -- =================================================================================
+  test "Revocation: Issuer Revokes Credential" do
+    -- 1. Bank issues a valid credential.
+    kycCid <- submit bank do
+      createCmd KYCCredential with
+        issuer = bank
+        owner = alice
+        expiryDate = futureExpiry
+        credentialDataHash = "HASH_REVOKE"
+
+    -- 2. BEFORE Alice can respond to any request, the Bank revokes her credential.
+    --    This archives the KYCCredential and creates a RevokedCredential marker.
+    revocationCid <- submit bank do
+      exerciseCmd kycCid RevokeCredential
+
+    -- 3. Assert that the original credential is now archived.
+    query @KYCCredential alice `shouldReturn` []
+
+    -- 4. Alice now attempts to generate a proof. This must fail because the
+    --    original credential contract (kycCid) has been archived.
+    submitMustFail alice do
+      exerciseCmd kycCid GenerateProof with
+        viewers = [dapp]
+        nonce = "NONCE_REVOKE"
+    pure ()
+
+  -- =================================================================================
+  -- Test 5: Proof reuse is rejected due to nonce mismatch
+  -- =================================================================================
+  test "Rejection: Proof reuse with different nonce" do
+    -- 1. Issue a valid credential.
+    kycCid <- submit bank do
+      createCmd KYCCredential with
+        issuer = bank
+        owner = alice
+        expiryDate = futureExpiry
+        credentialDataHash = "HASH_REUSE"
+
+    -- 2. DApp sends the first verification request with nonce1.
+    requestCid1 <- submit dapp do
+      createCmd VerificationRequest with
+        verifier = dapp
+        owner = alice
+        nonce = "NONCE_REUSE_1"
+        registryCid
+
+    -- 3. Alice generates a proof for the first request.
+    (proofCid, _) <- submit alice do
+      exerciseCmd kycCid GenerateProof with
+        viewers = [dapp]
+        nonce = "NONCE_REUSE_1"
+
+    -- 4. Alice successfully uses the proof for the first request.
+    submit alice do
+      exerciseCmd requestCid1 ProvideProof with proofCid
+    pure ()
+
+    -- 5. DApp sends a second request with a different nonce.
+    requestCid2 <- submit dapp do
+      createCmd VerificationRequest with
+        verifier = dapp
+        owner = alice
+        nonce = "NONCE_REUSE_2"
+        registryCid
+
+    -- 6. Alice maliciously tries to reuse the old proof (proofCid) which was
+    --    generated with nonce1. This must fail because the proof's nonce doesn't
+    --    match the new request's nonce.
+    submitMustFail alice do
+      exerciseCmd requestCid2 ProvideProof with proofCid
