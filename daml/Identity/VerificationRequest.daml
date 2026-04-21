@@ -1,0 +1,78 @@
+-- Copyright (c) 2024 Digital Asset (Switzerland) GmbH and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+module Identity.VerificationRequest where
+
+import DA.Set (Set)
+import qualified DA.Set as Set
+import Identity.KYCCredential (KYCCredential)
+import Identity.CredentialProof (CredentialProof)
+
+-- | Represents a request from a dApp or other entity (the verifier) to a user (the subject)
+-- | to present proof of a valid KYC credential from an accepted issuer.
+-- | The subject can respond with a `KYCCredential` contract, which, if valid,
+-- | results in the creation of a `CredentialProof` contract.
+template VerificationRequest
+  with
+    verifier         : Party
+      -- ^ The party (e.g., a dApp) requesting the identity verification.
+    subject          : Party
+      -- ^ The party whose identity is being verified.
+    acceptedIssuers  : Set Party
+      -- ^ A set of trusted identity issuers accepted by the verifier.
+    requestId        : Text
+      -- ^ A unique identifier for this verification request, specified by the verifier.
+    verifierMetadata : Text
+      -- ^ Human-readable description of the verifier (e.g., "CantonSwap DeFi App").
+  where
+    signatory verifier
+    observer subject
+
+    key (verifier, subject, requestId) : (Party, Party, Text)
+    maintainer key._1
+
+    -- | Allows the subject to respond to the verification request by providing their
+    -- | KYC credential and the associated zero-knowledge proof data.
+    choice RespondWithProof : ContractId CredentialProof
+      with
+        kycCredentialCid : ContractId KYCCredential
+          -- ^ The contract ID of the subject's KYC credential.
+        proofData        : Text
+          -- ^ The zero-knowledge proof data, confirming the validity of the credential
+          -- ^ without revealing the underlying personal information.
+          -- ^ This is typically a base64-encoded string or similar serialization.
+      controller subject
+      do
+        kycCredential <- fetch kycCredentialCid
+
+        -- Ensure the provided credential actually belongs to the subject of this request.
+        assertMsg
+          "The provided KYC credential does not belong to the subject of this verification request."
+          (kycCredential.owner == subject)
+
+        -- The core check: ensure the credential was issued by a party the verifier trusts.
+        assertMsg
+          ("The issuer of the provided credential ('" <> show kycCredential.issuer <> "') " <>
+           "is not in the verifier's list of accepted issuers.")
+          (Set.member kycCredential.issuer acceptedIssuers)
+
+        -- If all checks pass, create a proof contract, which serves as a durable,
+        -- on-ledger receipt of successful verification for this specific request.
+        create CredentialProof with
+          verifier
+          subject
+          issuer = kycCredential.issuer
+          requestId
+          proofData
+
+    -- | Allows the subject to decline the verification request, archiving the contract.
+    choice Decline : ()
+      controller subject
+      do
+        return ()
+
+    -- | Allows the verifier to cancel their request before the subject responds.
+    choice Cancel : ()
+      controller verifier
+      do
+        return ()
