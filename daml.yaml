@@ -6,4 +6,3 @@ dependencies:
   - daml-prim
   - daml-stdlib
   - daml-script
-parties: []
