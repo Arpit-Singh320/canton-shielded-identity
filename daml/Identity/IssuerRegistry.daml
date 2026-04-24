@@ -4,87 +4,75 @@
 module Identity.IssuerRegistry where
 
 import DA.Set (Set)
-import DA.Set qualified as Set
+import qualified DA.Set
 
--- | A registry of trusted parties who are authorized to issue KYC credentials.
---
--- This template serves as a central, on-ledger source of truth for which
--- entities (e.g., banks, financial institutions) are permitted to issue
--- `KYCCredential` contracts. The registry is managed by a `foundation` party,
--- which represents a governing body or consortium responsible for vetting and
--- approving issuers.
---
--- The contract is keyed by the `foundation`, ensuring that there is only one
--- active registry per foundation party on the ledger.
+-- | Represents an entity approved by the Foundation to issue identity credentials.
+-- This role contract serves as on-ledger proof that the `issuer` party is a valid
+-- participant in the shielded identity ecosystem. It is created by the Foundation
+-- when an issuer is added to the `IssuerRegistry`.
+template IssuerRole
+  with
+    foundation : Party
+      -- ^ The governing body of the identity network.
+    issuer : Party
+      -- ^ The party authorized to issue credentials.
+  where
+    signatory foundation, issuer
+
+    key (foundation, issuer) : (Party, Party)
+    maintainer key._1
+
+-- | The central registry of all credential issuers approved by the Foundation.
+-- There should only be one active instance of this contract on the ledger,
+-- managed by the `foundation` party. It maintains a set of all active issuers.
 template IssuerRegistry
   with
     foundation : Party
-      -- ^ The governing body that manages the list of approved issuers.
+      -- ^ The governing body of the identity network.
     issuers : Set Party
-      -- ^ The set of parties authorized to issue KYC credentials.
-    observers : Set Party
-      -- ^ Parties who can view the registry, e.g., dApps that need to verify issuers.
+      -- ^ The set of all parties currently authorized to issue credentials.
   where
     signatory foundation
-    observer observers
 
+    -- Ensures there is only one registry instance for a given foundation.
     key foundation : Party
-    maintainer key.foundation
+    maintainer key
 
-    -- | Non-consuming choice to check if a given party is a registered issuer.
-    --
-    -- This allows any observer of the registry to efficiently verify an issuer's
-    -- status without needing to fetch and parse the entire contract state.
-    nonconsuming choice IsRegisteredIssuer : Bool
-      with
-        issuerToVerify : Party
-          -- ^ The party to check for registration.
-      controller observers
-      do
-        return $ Set.member issuerToVerify issuers
-
-    -- | Add a new party to the set of authorized issuers.
-    --
-    -- Only the `foundation` can perform this action. The choice archives the
-    -- current registry contract and creates a new one with the updated issuer set.
-    choice AddIssuer : ContractId IssuerRegistry
+    -- | Allows the Foundation to add a new party to the set of approved issuers.
+    -- This action creates a new `IssuerRegistry` with the updated set and also
+    -- creates an `IssuerRole` contract for the new issuer, which serves as their
+    -- on-ledger authorization.
+    choice AddIssuer : (ContractId IssuerRegistry, ContractId IssuerRole)
       with
         newIssuer : Party
           -- ^ The party to be added as a credential issuer.
       controller foundation
       do
-        -- Ensure the party is not already a registered issuer to prevent duplicates.
-        assertMsg ("Issuer " <> show newIssuer <> " is already registered.") $
-          not $ Set.member newIssuer issuers
+        assertMsg "Issuer is already registered." (not $ DA.Set.member newIssuer issuers)
 
-        create this with
-          issuers = Set.insert newIssuer this.issuers
+        -- Create the role contract for the new issuer
+        issuerRoleCid <- create IssuerRole with foundation = foundation, issuer = newIssuer
 
-    -- | Remove a party from the set of authorized issuers.
-    --
-    -- This might be done if an issuer no longer meets the required standards or
-    -- voluntarily leaves the network. Only the `foundation` can perform this action.
+        -- Re-create the registry with the new issuer added
+        newRegistryCid <- create this with issuers = DA.Set.insert newIssuer this.issuers
+
+        return (newRegistryCid, issuerRoleCid)
+
+    -- | Allows the Foundation to remove a party from the set of approved issuers.
+    -- This action archives the issuer's `IssuerRole` contract and creates a new
+    -- `IssuerRegistry` with the updated set.
     choice RemoveIssuer : ContractId IssuerRegistry
       with
         issuerToRemove : Party
-          -- ^ The party to be removed from the list of issuers.
+          -- ^ The party to be removed from the issuer set.
       controller foundation
       do
-        -- Ensure the party is currently a registered issuer.
-        assertMsg ("Issuer " <> show issuerToRemove <> " is not registered.") $
-          Set.member issuerToRemove issuers
+        assertMsg "Issuer is not in the registry." (DA.Set.member issuerToRemove issuers)
 
-        create this with
-          issuers = Set.delete issuerToRemove this.issuers
+        -- Fetch and archive the corresponding IssuerRole contract.
+        -- This revokes their on-ledger authorization.
+        (issuerRoleCid, _) <- fetchByKey @IssuerRole (foundation, issuerToRemove)
+        archive issuerRoleCid
 
-    -- | Allows the foundation to update the set of observers for this registry.
-    --
-    -- This is useful for granting or revoking access to dApps that need to
-    -- consult the registry to validate KYC credential issuers.
-    choice SetObservers : ContractId IssuerRegistry
-      with
-        newObservers : Set Party
-          -- ^ The new, complete set of observers.
-      controller foundation
-      do
-        create this with observers = newObservers
+        -- Re-create the registry with the issuer removed
+        create this with issuers = DA.Set.delete issuerToRemove this.issuers
