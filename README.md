@@ -1,80 +1,117 @@
 # Canton Shielded Identity
 
-A reusable, privacy-preserving KYC credential for the Canton Network. Verify your identity once with a trusted institution and use it across all Canton dApps without ever revealing your personal data.
+[![CI](https://github.com/digital-asset/canton-shielded-identity/actions/workflows/ci.yml/badge.svg)](https://github.com/digital-asset/canton-shielded-identity/actions/workflows/ci.yml)
 
----
+A reusable, zero-knowledge KYC (Know Your Customer) credential for the Canton Network. Canton Shielded Identity allows a user to be verified once by a trusted institution and then use that verification across any dApp on the network, without ever revealing their personal data or the identity of the verifying institution.
 
-## The Problem: Repetitive and Risky KYC
+## The Problem: Repetitive, Insecure KYC
 
-In today's digital asset landscape, every application, protocol, and service requires its own Know-Your-Customer (KYC) check. This leads to a frustrating and broken experience for users and a significant burden for developers:
+In today's digital asset ecosystem, users are forced to complete a full KYC process for nearly every application they use. This is:
 
-*   **For Users:**
-    *   **Endless Repetition:** Uploading your passport, driver's license, and personal details for every new dApp is tedious and time-consuming.
-    *   **Privacy Invasion:** Your sensitive personal identifiable information (PII) is scattered across dozens of databases, dramatically increasing your exposure to data breaches.
-    *   **Lack of Control:** You have no say in how your data is stored, used, or shared after you provide it.
-
-*   **For dApp Developers:**
-    *   **High Friction:** Complex onboarding processes cause users to drop off, hurting growth.
-    *   **Compliance Burden:** Securely storing and managing PII is a massive operational, legal, and financial liability.
-    *   **Walled Gardens:** Lack of a common identity standard hinders interoperability and composability across the ecosystem.
+*   **Inefficient:** Users repeatedly submit the same sensitive documents (passports, driver's licenses, utility bills) and wait for verification, creating significant friction.
+*   **Insecure:** Each dApp and service provider stores a copy of the user's Personal Identifiable Information (PII), dramatically increasing the attack surface for data breaches.
+*   **Not Private:** Users' personal data is shared widely, often without a clear understanding of who has it or how it's being protected.
 
 ## The Solution: Verify Once, Use Everywhere
 
-Canton Shielded Identity introduces a new paradigm for digital identity. It leverages the inherent privacy capabilities of the Canton Network and Daml smart contracts to create a single, reusable KYC credential that is both secure and private.
+Canton Shielded Identity flips the model. A regulated financial institution (an **Issuer**) verifies a user's identity off-chain and then issues a non-transferable `KycCredential` contract to that user on the Canton ledger.
 
-The core principle is simple: **decouple identity verification from service access.**
+This on-chain credential acts as a cryptographic proof that the holder has successfully passed a KYC check from a trusted source. When a dApp (a **Verifier**) needs to confirm a user's KYC status, the user simply presents this credential.
+
+The system is designed with zero-knowledge principles:
+
+*   **The Verifier learns only one fact:** "This user has passed a valid KYC check."
+*   **The Verifier never learns:** The user's name, address, date of birth, or any other PII.
+*   **The Verifier never learns:** Which specific bank or institution issued the credential.
+
+This breaks the link between a user's on-chain activity and their real-world identity, providing robust privacy while still meeting regulatory requirements.
+
+---
 
 ### How It Works
 
-1.  **One-Time Verification:** A user completes a standard KYC process *once* with a trusted, regulated institution (e.g., their bank), referred to as a **KYC Provider**.
-2.  **Credential Issuance:** Upon successful verification, the KYC Provider uses a Daml smart contract to issue a `KycCredential` to the user's party on the Canton ledger. This credential acts as a cryptographic proof of verification but contains **zero PII**.
-3.  **Zero-Knowledge Presentation:** When a dApp needs to verify a user's KYC status, the user presents their `KycCredential`. The dApp's smart contracts can cryptographically verify that the credential is valid and was issued by a recognized KYC Provider.
-4.  **Privacy-Preserving Confirmation:** The dApp learns only one thing: **"This user has passed KYC."** It never learns the user's name, nationality, date of birth, or even which institution performed the original verification. The user's identity remains shielded.
+The lifecycle involves three key actors: the **User**, the **Issuer**, and the **Verifier**.
 
+1.  **Request:** A User (e.g., `Alice`) submits a request for a KYC credential to a trusted Issuer (e.g., `FirstBank`).
+2.  **Verification (Off-Chain):** `FirstBank` performs its standard, off-chain KYC/AML due diligence on Alice.
+3.  **Issuance (On-Chain):** Once Alice is approved, `FirstBank` creates a `KycCredential` contract on the Canton ledger. `Alice` is the owner of this contract. The issuer's identity is obfuscated on the contract to maintain privacy.
+4.  **Presentation:** Alice wants to use a decentralized exchange (the **Verifier**). The exchange requires all traders to be KYC'd.
+5.  **Verification:** The exchange's smart contract logic requests proof of KYC. Alice presents her `KycCredential` contract. The exchange's contract can verify the credential's validity without ever seeing Alice's PII or knowing that `FirstBank` was the original issuer.
+6.  **Access Granted:** With verification complete, the exchange grants Alice access to its services. Alice can repeat this process with any other dApp that accepts the Canton Shielded Identity standard.
 
-
-### Key Features & Benefits
-
-*   **Zero-Knowledge Privacy:** Protects user PII from dApps, preserving confidentiality and reducing the risk of data leaks.
-*   **User Sovereignty:** Puts users back in control of their identity. They explicitly consent to every request to prove their KYC status.
-*   **Drastically Reduced Friction:** Enables instant, one-click onboarding for any dApp in the ecosystem, leading to higher user conversion and satisfaction.
-*   **Ecosystem-Wide Interoperability:** Creates a composable identity layer that any Canton application can integrate, fostering a more connected and seamless network.
-*   **Reduced Compliance Burden:** Frees dApp developers from the liability and operational overhead of storing and protecting sensitive user data.
-*   **New Business Models:** Allows trusted institutions to act as identity anchors in the Web3 economy, offering "Identity-as-a-Service".
+---
 
 ## Project Structure
 
-This repository contains the core Daml smart contracts that power the Canton Shielded Identity protocol.
+This repository contains the full implementation of the Canton Shielded Identity protocol.
 
-*   `/daml`: The Daml source code for the smart contracts.
-    *   `Daml/KYC/Provider.daml`: Defines the `KycProviderRole` and the workflow for onboarding trusted identity verifiers.
-    *   `Daml/KYC/Credential.daml`: Defines the `KycCredential` template, the on-ledger representation of a user's verified status.
-    *   `Daml/KYC/Request.daml`: Defines the `KycVerificationRequest` template used by dApps to request proof of KYC from a user.
+```
+.
+├── daml/                      # Daml smart contracts
+│   └── Daml/Identity/Kyc.daml # Core KycCredential template and workflow
+├── frontend/                  # Example React UI for users, issuers, and verifiers
+│   ├── src/
+│   │   ├── App.tsx            # Main application component and routing
+│   │   └── CredentialStatus.tsx # Component to display credential state
+│   └── package.json
+├── docs/                      # Detailed guides for participants
+│   ├── ISSUER_GUIDE.md        # Instructions for institutions acting as Issuers
+│   └── VERIFIER_GUIDE.md      # Instructions for dApps acting as Verifiers
+├── .gitignore
+├── daml.yaml                  # Daml project configuration
+└── README.md                  # This file
+```
 
 ## Getting Started
 
-This project is built using the Daml Packaged Manager (DPM).
+Follow these steps to build the Daml contracts and run the example application locally.
 
-1.  **Install DPM:**
-    ```sh
-    curl https://get.digitalasset.com/install/install.sh | sh
-    ```
+### Prerequisites
 
-2.  **Build the Project:**
-    ```sh
-    dpm build
-    ```
+*   [DPM (Digital Asset Package Manager)](https://docs.digitalasset.com/dpm/index.html) version 3.4.0 or later.
+*   [Node.js](https://nodejs.org/) (LTS version recommended).
 
-3.  **Run Tests:**
-    ```sh
-    dpm test
-    ```
+### 1. Build the Daml Model
 
-4.  **Start a Local Canton Sandbox:**
-    ```sh
-    dpm sandbox
-    ```
+Compile the Daml code to produce a distributable DAR (Daml Archive).
+
+```sh
+dpm build
+```
+
+This will create a file at `.daml/dist/canton-shielded-identity-0.1.0.dar`.
+
+### 2. Run the Local Canton Ledger
+
+Start a local Canton sandbox environment. This command also automatically uploads the project's DAR file to the ledger.
+
+```sh
+dpm sandbox
+```
+
+The sandbox exposes two key endpoints:
+*   **gRPC API:** `localhost:6866`
+*   **JSON API:** `localhost:7575`
+
+### 3. Run the Frontend Application
+
+Navigate to the `frontend` directory, install dependencies, and start the development server.
+
+```sh
+cd frontend
+npm install
+npm start
+```
+
+The application will be available at `http://localhost:3000`. You can use the UI to log in as different parties (User, Issuer, Verifier) and step through the credential issuance and verification flows.
+
+## Further Reading
+
+For role-specific integration details, please see our detailed guides:
+
+*   **[Issuer Guide](./docs/ISSUER_GUIDE.md):** For financial institutions that want to issue KYC credentials.
+*   **[Verifier Guide](./docs/VERIFIER_GUIDE.md):** For dApp developers who want to consume KYC credentials to onboard users.
 
 ## License
 
-This project is licensed under the [Apache License 2.0](LICENSE).
+This project is licensed under the [Apache 2.0 License](LICENSE).
