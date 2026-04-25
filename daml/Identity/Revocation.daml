@@ -5,37 +5,77 @@ module Identity.Revocation where
 
 import DA.Time (Time)
 
--- | Represents the revocation of a KYC credential.
+-- | Represents the public, unique identifier for a KYC Credential.
+-- This is typically a cryptographic hash or commitment that does not reveal
+-- personally identifiable information (PII) but can be used to uniquely identify
+-- the credential for status checks, such as revocation.
+type CredentialHash = Text
+
+-- | A notice contract indicating that a specific KYC credential has been revoked
+-- by its issuer.
 --
--- The existence of a `Revocation` contract on the ledger signifies that the
--- corresponding `KYCCredential` is no longer valid. Verifiers (dApps) must query
--- for this contract by key `(issuer, credentialId)` before accepting a `CredentialProof`.
--- If this contract is found, the proof and the underlying credential should be
--- considered invalid.
---
--- This contract is intentionally designed without observers to maximize privacy.
--- A verifier only learns about a revocation if they are actively trying to
--- verify a credential from a specific issuer. This prevents broadcasting revocation
--- information to uninvolved parties.
-template Revocation
+-- This contract is created when an issuer exercises the `Revoke` choice on a
+-- credential. A subject's wallet should check for the existence of this contract
+-- by key to determine if their credential is still valid before generating a ZK
+-- proof for a verifier. The presence of this contract for a given `credentialHash`
+-- signals that the associated credential is no longer valid.
+template RevocationNotice
   with
-    issuer : Party
-      -- ^ The party that issued and is now revoking the credential. This party
-      -- must match the issuer of the original `KYCCredential`.
-    credentialId : Text
-      -- ^ The unique identifier of the credential being revoked. This must match
-      -- the `credentialId` field of the `KYCCredential`.
+    issuer         : Party
+      -- ^ The party that issued and subsequently revoked the credential.
+    subject        : Party
+      -- ^ The party whose credential has been revoked.
+    credentialHash : CredentialHash
+      -- ^ The unique, non-personally-identifiable hash of the revoked credential.
     revocationTime : Time
-      -- ^ The timestamp when the revocation was officially recorded on the ledger.
-    reason : Text
-      -- ^ A human-readable reason for the revocation (e.g., "Owner reported lost",
-      -- "Compliance update required", "Suspected fraudulent activity").
+      -- ^ The timestamp of when the revocation occurred.
+    reason         : Text
+      -- ^ The reason provided by the issuer for the revocation.
   where
     signatory issuer
+    observer subject
 
-    key (issuer, credentialId) : (Party, Text)
-    maintainer issuer
+    key (issuer, credentialHash) : (Party, CredentialHash)
+    maintainer key._1
 
-    -- This contract has no choices. Its creation is an irreversible event that
-    -- invalidates a credential. It remains on the ledger as a permanent record
-    -- of the revocation.
+    -- | Allows the issuer to archive the notice if it was created in error or
+    -- | is no longer needed for audit purposes. This is a manual cleanup action
+    -- | and does not "un-revoke" the credential.
+    choice Archive : ()
+      controller issuer
+      do
+        pure ()
+
+-- | Interface for credentials that can be revoked by their issuer.
+-- Any credential template that should support revocation must implement this
+-- interface. The implementation is responsible for archiving the credential
+-- itself upon revocation.
+interface Revocable where
+  viewtype V
+    with
+      issuer         : Party
+      subject        : Party
+      credentialHash : CredentialHash
+
+  -- | Revokes the credential, resulting in the creation of a `RevocationNotice`.
+  -- The implementing template's choice body is responsible for archiving the
+  -- credential contract itself. For example:
+  -- > choice Revoke : ContractId RevocationNotice
+  -- >   with reason: Text
+  -- >   controller issuer
+  -- >   do
+  -- >     archive self
+  -- >     super.Revoke with reason
+  nonconsuming choice Revoke : ContractId RevocationNotice
+    with
+      reason : Text
+        -- ^ The reason for revoking the credential.
+    controller view this.issuer
+    do
+      now <- getTime
+      create RevocationNotice with
+        issuer = view this.issuer
+        subject = view this.subject
+        credentialHash = view this.credentialHash
+        revocationTime = now
+        reason
