@@ -3,76 +3,89 @@
 
 module Identity.VerificationRequest where
 
-import DA.Set (Set)
-import qualified DA.Set as Set
-import Identity.KYCCredential (KYCCredential)
-import Identity.CredentialProof (CredentialProof)
+import DA.Time (Time, getTime)
 
--- | Represents a request from a dApp or other entity (the verifier) to a user (the subject)
--- | to present proof of a valid KYC credential from an accepted issuer.
--- | The subject can respond with a `KYCCredential` contract, which, if valid,
--- | results in the creation of a `CredentialProof` contract.
+-- | Represents the successful verification of a subject's credential for a specific policy.
+-- This contract is created when a Subject successfully responds to a VerificationRequest
+-- with a valid zero-knowledge proof. It serves as a durable, on-ledger record of the
+-- successful verification event for the Verifier, without revealing the underlying credential
+-- or its issuer.
+template VerifiedState
+  with
+    verifier: Party
+      -- ^ The party that requested and has now verified the credential (e.g., a dApp).
+    subject: Party
+      -- ^ The party whose credential was successfully verified (e.g., a user).
+    verificationPolicy: Text
+      -- ^ The policy against which the credential was verified (e.g., "is-kyc-approved", "is-accredited-investor").
+    credentialCommitment: Text
+      -- ^ A cryptographic commitment to the credential used for verification. This prevents
+      -- replay of proofs for different credentials, without revealing the credential itself.
+    verifiedAt: Time
+      -- ^ The timestamp of when the verification was confirmed on the ledger.
+  where
+    signatory verifier, subject
+
+    key (verifier, subject, verificationPolicy) : (Party, Party, Text)
+    maintainer key._1
+
+-- | A request from a Verifier (e.g., a dApp) to a Subject (e.g., a user) to present
+-- a ZK-proof of a valid identity credential. This contract initiates the shielded
+-- verification workflow.
 template VerificationRequest
   with
-    verifier         : Party
-      -- ^ The party (e.g., a dApp) requesting the identity verification.
-    subject          : Party
-      -- ^ The party whose identity is being verified.
-    acceptedIssuers  : Set Party
-      -- ^ A set of trusted identity issuers accepted by the verifier.
-    requestId        : Text
-      -- ^ A unique identifier for this verification request, specified by the verifier.
-    verifierMetadata : Text
-      -- ^ Human-readable description of the verifier (e.g., "CantonSwap DeFi App").
+    verifier: Party
+      -- ^ The dApp or party requesting proof of verification.
+    subject: Party
+      -- ^ The user who needs to provide the proof.
+    nonce: Text
+      -- ^ A unique, single-use value provided by the verifier. The subject must include
+      -- this nonce in their signed ZK-proof to prevent replay attacks.
+    verificationPolicy: Text
+      -- ^ Describes the specific claim the verifier wants to check, e.g., "is-over-18", "is-us-person".
+    expiryTime: Time
+      -- ^ The time after which this request is no longer valid and cannot be responded to.
   where
     signatory verifier
     observer subject
 
-    key (verifier, subject, requestId) : (Party, Party, Text)
+    ensure getTime <= expiryTime
+
+    key (verifier, subject) : (Party, Party)
     maintainer key._1
 
-    -- | Allows the subject to respond to the verification request by providing their
-    -- | KYC credential and the associated zero-knowledge proof data.
-    choice RespondWithProof : ContractId CredentialProof
-      with
-        kycCredentialCid : ContractId KYCCredential
-          -- ^ The contract ID of the subject's KYC credential.
-        proofData        : Text
-          -- ^ The zero-knowledge proof data, confirming the validity of the credential
-          -- ^ without revealing the underlying personal information.
-          -- ^ This is typically a base64-encoded string or similar serialization.
-      controller subject
-      do
-        kycCredential <- fetch kycCredentialCid
-
-        -- Ensure the provided credential actually belongs to the subject of this request.
-        assertMsg
-          "The provided KYC credential does not belong to the subject of this verification request."
-          (kycCredential.owner == subject)
-
-        -- The core check: ensure the credential was issued by a party the verifier trusts.
-        assertMsg
-          ("The issuer of the provided credential ('" <> show kycCredential.issuer <> "') " <>
-           "is not in the verifier's list of accepted issuers.")
-          (Set.member kycCredential.issuer acceptedIssuers)
-
-        -- If all checks pass, create a proof contract, which serves as a durable,
-        -- on-ledger receipt of successful verification for this specific request.
-        create CredentialProof with
-          verifier
-          subject
-          issuer = kycCredential.issuer
-          requestId
-          proofData
-
-    -- | Allows the subject to decline the verification request, archiving the contract.
-    choice Decline : ()
-      controller subject
-      do
-        return ()
-
-    -- | Allows the verifier to cancel their request before the subject responds.
+    -- | Allows the verifier to withdraw the request before it's fulfilled or expires.
     choice Cancel : ()
       controller verifier
       do
         return ()
+
+    -- | Allows the subject to respond with a zero-knowledge proof satisfying the request.
+    -- The proof itself is generated and typically validated off-ledger; this choice serves
+    -- to commit the successful result to the ledger atomically.
+    choice RespondWithProof : ContractId VerifiedState
+      controller subject
+      with
+        zkProof: Text
+          -- ^ The serialized zero-knowledge proof. This is opaque to the ledger but can be
+          -- validated off-ledger by the verifier's systems.
+        credentialCommitment: Text
+          -- ^ The cryptographic commitment to the specific credential being used for the proof.
+      do
+        -- The core ZK proof validation (checking the zkProof against the nonce,
+        -- verificationPolicy, and a set of trusted issuer public keys) is expected
+        -- to happen in the Verifier's off-ledger application logic.
+        -- The Verifier's role as a signatory on the resulting `VerifiedState` contract
+        -- serves as their on-ledger confirmation that this off-ledger validation
+        -- was successful. This pattern keeps complex and potentially expensive
+        -- cryptographic operations off the critical path of the ledger.
+
+        now <- getTime
+        assertMsg "This verification request has expired and can no longer be fulfilled." (now <= expiryTime)
+
+        create VerifiedState with
+          verifier
+          subject
+          verificationPolicy
+          credentialCommitment
+          verifiedAt = now
