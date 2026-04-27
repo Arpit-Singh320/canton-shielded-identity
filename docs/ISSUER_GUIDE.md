@@ -1,139 +1,85 @@
 # Canton Shielded Identity: Issuer Guide
 
-## 1. Introduction
+This document provides a comprehensive guide for regulated financial institutions and other qualified entities on how to become an approved credential Issuer within the Canton Shielded Identity network.
 
-Welcome to the Canton Shielded Identity network. By becoming an approved issuer, your institution can provide a valuable service to the Canton ecosystem: issuing reusable, privacy-preserving Know Your Customer (KYC) credentials.
+## 1. Overview
 
-This system allows a user to verify their identity with you *once*. You then issue an on-ledger `VerifiedCredential` that can be presented to any dApp on the network. The dApp learns only that the user has passed KYC, not the underlying personal data, nor which institution performed the verification.
+The Canton Shielded Identity protocol enables a "verify-once, use-everywhere" model for Know Your Customer (KYC) compliance across dApps on the Canton Network. It leverages Daml smart contracts and zero-knowledge proofs to allow users to prove their verified status without revealing their personal data or the identity of the verifying institution.
 
-**Benefits for Issuers:**
+**The Role of an Issuer**
 
-*   **Interoperability:** Your KYC verification becomes a passport for the entire Canton dApp ecosystem.
-*   **New Revenue Streams:** You can charge a fee for each verification, creating a new line of business.
-*   **Enhanced Reputation:** Position your institution as a foundational identity provider in the Web3 space.
+An Issuer is a trusted and regulated entity (e.g., a bank, a licensed money services business) that is authorized by the network's governing body to perform KYC/AML checks on users and issue on-ledger credentials attesting to their verified status.
 
-This guide outlines the process for becoming an approved issuer and integrating your systems with the Shielded Identity smart contracts.
+The integrity and trustworthiness of the entire Shielded Identity ecosystem depend on the diligence and rigor of its approved Issuers. As an Issuer, you are a cornerstone of this trust.
 
-## 2. Prerequisites
+Your core responsibilities are:
+1.  **Onboarding:** Applying and getting approved by the network operator.
+2.  **Verification:** Performing robust, compliant KYC/AML checks on individuals.
+3.  **Issuance:** Creating the on-ledger `KycCredential` smart contract for verified users.
+4.  **Revocation:** Promptly revoking credentials if a user's KYC status changes.
 
-Before beginning the application process, your institution must meet the following criteria:
+## 2. Becoming an Approved Issuer
 
-### Legal & Compliance
+Authorization to issue credentials is a governed process to ensure that all Issuers meet the high standards required by the network.
 
-*   You must be a regulated financial institution (e.g., bank, trust company) or another entity legally authorized and qualified to perform KYC/AML checks in your jurisdiction.
-*   You must have robust internal policies and procedures for identity verification that meet or exceed industry standards.
+### Prerequisites
 
-### Technical
+Before applying, your organization must:
+*   Be a regulated financial institution or an entity legally authorized to perform KYC/AML checks in your jurisdiction.
+*   Have a registered Party ID on the target Canton Network.
+*   Maintain robust, well-documented internal policies and procedures for KYC, AML, and Counter-Financing of Terrorism (CFT) that comply with local and international standards (e.g., FATF recommendations).
 
-*   **Canton Participant Node:** You must operate a participant node connected to the target Canton network (e.g., DevNet, MainNet).
-*   **Allocated Party:** You must have a unique `Party` identity on the network that will be used for all issuance activities. This party ID will need to be shared with the network governance body during onboarding.
+### The Application Process
 
-## 3. The Onboarding Process
+1.  **Initial Contact:** Begin by contacting the Canton Shielded Identity Network Operator. You will be asked to provide initial information about your organization, its regulatory status, and its operational jurisdiction.
 
-Becoming an issuer is a governed process to ensure the integrity of the network.
+2.  **Off-Ledger Due Diligence:** The Network Operator will conduct a thorough due diligence process. This typically involves submitting documentation such as:
+    *   Proof of regulatory licenses and good standing.
+    *   Detailed descriptions of your KYC/AML policies.
+    *   Information on your data security and privacy practices.
+    *   Technical contact information for your operations team.
 
-### Step 1: Application
+3.  **On-Ledger Authorization:** Once your organization is approved, the Network Operator will create an `IssuerAuthority` contract on the Canton ledger.
+    *   **Contract:** `Canton.ShieldedIdentity.Authority.IssuerAuthority`
+    *   **Signatory:** Your organization's Canton Party ID.
+    *   This contract is the on-ledger, cryptographic proof of your status as an approved Issuer. You must hold this contract to be able to exercise the choice to issue new credentials.
 
-Contact the Canton Shielded Identity Governance Council (contact details to be provided by the specific network operator, e.g., `governance@canton-network.io`). Your application should include:
+## 3. The Credential Issuance Workflow
 
-*   The legal name and jurisdiction of your institution.
-*   Proof of your regulatory status.
-*   A high-level overview of your KYC/AML policies.
-*   The Canton `Party` ID you intend to use for issuance.
+The issuance process is designed to separate sensitive, off-ledger identity verification from the privacy-preserving on-ledger attestation.
 
-### Step 2: Due Diligence
+**Step 1: User Request & KYC (Off-Ledger)**
+A user (who is a Canton party) initiates a request for a KYC credential through your existing, secure customer-facing channels (e.g., your online banking portal, a dedicated application). As part of this process, the user provides their Canton Party ID.
 
-The Governance Council will review your application and perform a due diligence process. This may involve requests for further documentation to validate your legal standing and compliance frameworks.
+**Step 2: Identity Verification (Off-Ledger)**
+Your organization performs its standard, compliant KYC/AML verification process on the user. This is the same process you use for your other regulated activities. **No Personally Identifiable Information (PII) is ever sent to the Canton ledger.**
 
-### Step 3: On-Ledger Approval
+**Step 3: On-Ledger Credential Creation**
+Upon successful verification, you create the on-ledger credential:
+*   You use your `IssuerAuthority` contract ID to exercise the `IssueKycCredential` choice.
+*   This choice takes the user's `Party` ID and a unique `credentialId` (e.g., a UUID) as arguments.
+*   This action atomically creates a `KycCredential` contract on the ledger.
+    *   **Template:** `Canton.ShieldedIdentity.Credential.KycCredential`
+    *   **Signatories:** You (the Issuer) and the user (the owner).
+    *   This contract acts as the on-ledger "anchor" of trust. It contains no PII, only the party IDs, the credential ID, and metadata like the issue date. The user will later use this contract in combination with their off-ledger data to generate zero-knowledge proofs for dApps.
 
-Once your application is approved, the Governance Council will create an `Identity.IssuerPermission.IssuerPermission` contract on the ledger.
+## 4. Credential Revocation
 
-*   **Signatory:** The Governance Council's party.
-*   **Observer:** Your institution's party.
+As an Issuer, you have an ongoing obligation to monitor the KYC status of users you have verified. If a user's status changes (e.g., they are added to a sanctions list, or their risk profile changes significantly), you must revoke their credential promptly.
 
-This contract is your official, on-ledger license to issue credentials. It serves as the anchor for all your issuance and revocation activities. You can query for this contract to confirm your status has been activated.
+**The Revocation Process:**
 
-## 4. Technical Integration: Issuance Workflow
+1.  **Identify the Trigger:** An internal or external event flags a user for re-evaluation, and your compliance team determines their credential must be revoked.
 
-The core workflow involves listening for user requests, performing off-ledger verification, and creating an on-ledger credential.
+2.  **Locate the Contract:** Using your view of the ledger, query for the active `KycCredential` contract corresponding to the user's Party ID that you issued.
 
-### Step 1: Listen for Verification Requests
+3.  **Exercise the `Revoke` Choice:** Exercise the `Revoke` choice on the `KycCredential` contract. This choice requires a `reason` for the revocation, which is stored on the resulting contract.
 
-Users will initiate the process by creating an `Identity.VerificationRequest.VerificationRequest` contract, designating your party as the `issuer`. You need to monitor the ledger for these contracts.
+4.  **Confirm Revocation:** This action atomically archives the `KycCredential` and creates a new `RevokedKycCredential` contract in its place. This new contract is a permanent, visible record of the revocation. Verifier dApps are designed to check for the existence of this revocation record before accepting a user's ZK-proof.
 
-You can do this using:
+## 5. Issuer Responsibilities and Best Practices
 
-*   **Canton Ledger API:** Periodically query the `/v2/state/active-contracts` endpoint for contracts of template `Identity.VerificationRequest:VerificationRequest` where your party is a stakeholder.
-*   **Participant Query Store (PQS):** If you have PQS configured, you can run a SQL query against your participant's database:
-    ```sql
-    SELECT contract_id, payload
-    FROM active('Identity.VerificationRequest:VerificationRequest', '${yourPartyId}');
-    ```
-
-### Step 2: Off-Ledger Data Verification
-
-The `VerificationRequest` contains a `userDataHash` field. This is a `SHA256` hash of the user's Personally Identifiable Information (PII), which they will have submitted to you through a secure, off-ledger channel (e.g., your existing customer onboarding portal).
-
-Your process should be:
-
-1.  Securely receive the user's raw PII (name, DOB, address, etc.) through your off-ledger system.
-2.  Hash the received PII using `SHA256`.
-3.  **Crucially, verify that your calculated hash matches the `userDataHash` from the on-ledger `VerificationRequest` contract.** This confirms that the PII you are about to check corresponds to the on-ledger request.
-4.  Perform your standard, internal KYC/AML verification on the raw PII.
-
-### Step 3: Issue or Reject the Credential
-
-Based on the outcome of your KYC check, you will exercise one of the choices on the `VerificationRequest` contract.
-
-#### On Successful Verification (KYC Pass)
-
-Exercise the `Issue` choice on the `VerificationRequest` contract ID.
-
-*   **Choice:** `Issue`
-*   **Controller:** Your `issuer` party.
-*   **Arguments:**
-    *   `permissionCid`: The `ContractId` of your `Identity.IssuerPermission.IssuerPermission` contract.
-    *   `validUntil`: A `Date` specifying when the credential expires. This should align with your internal compliance policies for re-verification.
-
-This action atomically:
-1.  Consumes the `VerificationRequest`.
-2.  Creates a new `Identity.VerifiedCredential.VerifiedCredential` contract, which is the user's portable, privacy-preserving identity token.
-
-#### On Failed Verification (KYC Fail)
-
-Exercise the `Reject` choice on the `VerificationRequest` contract ID.
-
-*   **Choice:** `Reject`
-*   **Controller:** Your `issuer` party.
-*   **Arguments:**
-    *   `reason`: A string explaining the reason for rejection (e.g., "Documentation mismatch", "Sanctions list match"). Be mindful of data privacy regulations when populating this field.
-
-This action archives the `VerificationRequest` and concludes the workflow.
-
-## 5. Credential Revocation
-
-You have a legal and operational responsibility to revoke credentials if a user's status changes (e.g., they are added to a sanctions list).
-
-The revocation process is initiated from your `IssuerPermission` contract.
-
-1.  Identify the `ContractId` of the `VerifiedCredential` that needs to be revoked. You should maintain an off-ledger mapping of user identity to their `credentialCid`.
-2.  Exercise the `RevokeCredential` choice on your `IssuerPermission` contract.
-    *   **Choice:** `RevokeCredential`
-    *   **Controller:** Your `issuer` party.
-    *   **Arguments:**
-        *   `credentialCid`: The `ContractId` of the credential to revoke.
-        *   `reason`: A string explaining the reason for revocation.
-
-This action creates a public `Identity.Revocation.RevocationNotice` on the ledger. dApps are responsible for checking for the existence of a `RevocationNotice` corresponding to a credential before accepting it.
-
-## 6. Security & Best Practices
-
-*   **Party Key Management:** Your issuer party's private keys are critical security assets. They authorize all issuance and revocation actions. Use a secure key management solution and follow Canton's recommended practices for key rotation and storage.
-*   **API Security:** The connection between your internal systems and your Canton participant node must be secured. Use network firewalls, mTLS, and other standard security measures.
-*   **Data Privacy:** All user PII should be handled exclusively in your secure, off-ledger environment. Never record raw PII on the ledger. The use of `userDataHash` is designed specifically for this purpose.
-*   **Atomicity:** The Daml model ensures that issuance is atomic. You never risk a state where a request is archived but no credential is created. Trust the ledger's transactional guarantees.
-
-## 7. Support
-
-For questions about the onboarding process or technical integration, please contact the Canton Shielded Identity Governance Council. For issues related to your Canton node or the underlying network, please contact your participant node provider or the network operator.
+*   **Security:** Safeguard the private keys associated with your Canton Party ID with the utmost care. A compromise of your keys would allow an attacker to falsely issue or revoke credentials, undermining network trust. Use institutional-grade custody solutions.
+*   **Data Privacy:** All user PII collected during the KYC process must remain secured within your off-ledger systems. Adhere strictly to data privacy regulations such as GDPR and CCPA.
+*   **Compliance:** Continuously monitor and update your KYC/AML procedures to adapt to changing regulations. The network's trust is a direct reflection of your compliance standards.
+*   **Availability:** Ensure your Canton participant node and associated infrastructure are highly available to issue and revoke credentials in a timely manner.
