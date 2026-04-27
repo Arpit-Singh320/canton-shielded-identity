@@ -1,209 +1,139 @@
-# Canton Shielded Identity: Verifier's Guide
+# Verifier Integration Guide: Canton Shielded Identity
 
-This guide is for dApp developers who want to integrate the Canton Shielded Identity protocol. By following these steps, your dApp can verify a user's KYC status without accessing their personal data, streamlining user onboarding and enhancing privacy.
+Welcome to the Canton Shielded Identity Verifier Guide. This document provides everything you need to integrate our privacy-preserving KYC solution into your Canton-based dApp.
 
-## Table of Contents
+By using Shielded Identity, you can onboard users who have already been verified by a trusted institution, without ever handling their sensitive personal data. This reduces user friction, lowers your compliance overhead, and builds user trust.
 
-- [Introduction](#introduction)
-- [How It Works](#how-it-works)
-- [Prerequisites](#prerequisites)
-- [Integration Steps](#integration-steps)
-  - [Step 1: Install the SDK](#step-1-install-the-sdk)
-  - [Step 2: Request a Verification Proof (Frontend)](#step-2-request-a-verification-proof-frontend)
-  - [Step 3: Submit Proof for On-Chain Verification (Backend)](#step-3-submit-proof-for-on-chain-verification-backend)
-- [Daml Integration Example](#daml-integration-example)
-- [Security Considerations](#security-considerations)
-- [Frequently Asked Questions](#frequently-asked-questions)
+## Core Concepts
 
----
+*   **Verifier:** Your dApp or service. You need to verify that a user has completed KYC before allowing them to access certain features.
+*   **Subject:** The end-user interacting with your dApp. They hold a shielded KYC credential.
+*   **Issuer:** A trusted institution (e.g., a bank) that performs the initial KYC/AML check and issues the on-ledger credential to the Subject.
+*   **Shielded Credential:** A Daml contract held by the Subject, which is not directly visible to you. Its existence can be proven without revealing its contents or its issuer.
+*   **Verification Receipt:** A Daml contract that serves as proof that a specific Subject has successfully presented their credential to a specific Verifier. This is the contract your dApp will look for.
 
-## Introduction
+## The Verification Workflow
 
-Canton Shielded Identity is a reusable, zero-knowledge KYC credential standard. It allows users to get verified once by a trusted issuer (like a bank) and then prove their verified status to any dApp on the Canton Network without revealing their identity, the issuer, or any personal identifying information (PII).
+The process is designed to be simple and non-intrusive. It involves a three-step dance between your dApp's backend, the user's wallet, and the Canton ledger.
 
-**Benefits for dApps (Verifiers):**
+```mermaid
+sequenceDiagram
+    participant dApp Backend (Verifier)
+    participant Canton Ledger
+    participant User's Wallet (Subject)
 
--   **Frictionless Onboarding:** Eliminate the need for users to upload documents or complete lengthy KYC forms for your dApp.
--   **Access to a Verified User Base:** Instantly tap into the growing pool of KYC'd users on Canton.
--   **Enhanced Privacy & Compliance:** Drastically reduce your compliance burden and data security risks. You never store or handle sensitive PII.
--   **Composable Identity:** Build sophisticated workflows that require verified users without compromising on decentralization or privacy.
-
-## How It Works
-
-The verification flow is designed for simplicity and security:
-
-1.  **Request:** Your dApp's frontend requests a proof from the user's wallet, specifying what needs to be verified (e.g., "KYC status is 'Approved'").
-2.  **Generate:** The user's wallet, holding their encrypted credential, generates a zero-knowledge proof locally. This proof attests to the KYC status without revealing any other data.
-3.  **Submit:** The generated proof is sent to your dApp's backend.
-4.  **Verify:** Your backend submits the proof to the Shielded Identity smart contracts on the Canton ledger. The contracts perform two crucial checks:
-    a. The ZK proof is mathematically valid.
-    b. The credential used to generate the proof has not been revoked by the issuer.
-5.  **Confirm:** If both checks pass, the transaction succeeds, and your dApp can confidently treat the user as verified. Your dApp receives a simple `true`/`false` result.
-
-![Verifier Flow Diagram](https://example.com/verifier_flow.png) <!-- Fictional diagram link for illustration -->
-
-## Prerequisites
-
--   An existing Canton dApp with a frontend and a backend capable of submitting Daml commands.
--   A basic understanding of the Daml ledger model.
--   Your dApp's Daml models must depend on the `canton-shielded-identity` DAR.
-
-In your `daml.yaml`:
-
-```yaml
-sdk-version: 3.4.0
-name: my-dapp
-version: 0.1.0
-source: daml
-dependencies:
-  - daml-prim
-  - daml-stdlib
-  - daml-script
-  # Add the Shielded Identity dependency
-  - .daml/dist/canton-shielded-identity-0.1.0.dar
+    dApp Backend (Verifier)->>+Canton Ledger: Create VerificationRequest(verifier, subject)
+    Canton Ledger-->>-User's Wallet (Subject): Sees VerificationRequest contract
+    User's Wallet (Subject)->>User's Wallet (Subject): User clicks "Prove KYC"
+    User's Wallet (Subject)->>+Canton Ledger: Exercise PresentProof(credentialCid) on VerificationRequest
+    Note over Canton Ledger, User's Wallet (Subject): Choice logic fetches credential,<br/>validates it, and creates a receipt.<br/>The credential itself is not revealed to the Verifier.
+    Canton Ledger-->>dApp Backend (Verifier): Sees VerificationReceipt contract
+    Canton Ledger-->>-User's Wallet (Subject): Consumes VerificationRequest
 ```
 
-## Integration Steps
+### Step 1: Request Verification
 
-### Step 1: Install the SDK
+When a user attempts to access a feature in your dApp that requires KYC, your backend creates a `VerificationRequest` contract. This contract acts as an invitation for the user to prove their KYC status.
 
-Our TypeScript SDK provides a convenient client for interacting with user wallets and the on-chain verification contracts.
-
-```bash
-npm install @canton-id/shielded-identity-client
-```
-
-### Step 2: Request a Verification Proof (Frontend)
-
-In your frontend application, when a user needs to prove their KYC status, use the SDK to generate a `VerificationRequest`. The user's wallet will detect this request and prompt them for approval.
-
-```typescript
-// src/components/KycButton.tsx
-import React from 'react';
-import { useLedger, useParty } from '@c7/react';
-import { CredentialClient } from '@canton-id/shielded-identity-client';
-
-export const KycButton = () => {
-  const ledger = useLedger();
-  const party = useParty();
-  const credentialClient = new CredentialClient(ledger, party);
-
-  const handleVerifyClick = async () => {
-    try {
-      // 1. Create a public request on the ledger for the user to respond to.
-      // The `dappParty` is your dApp's operator party.
-      // The `nonce` ensures this request is unique and prevents replay attacks.
-      const nonce = crypto.randomUUID();
-      const verificationRequestCid = await credentialClient.createVerificationRequest({
-        dappParty: 'dapp-operator::your-party-id',
-        userParty: party,
-        nonce: nonce,
-      });
-
-      // 2. The user's wallet will automatically detect this contract
-      // and prompt the user to generate and submit a proof.
-      // You should listen for the successful verification event.
-      console.log('Verification request created:', verificationRequestCid);
-      alert('Please check your wallet to approve the KYC verification request.');
-
-      // In a real application, you would subscribe to a stream of
-      // `YourDapp.VerifiedUser` contracts to confirm success.
-
-    } catch (error) {
-      console.error("Failed to initiate KYC verification:", error);
-      alert("Error: Could not start KYC process.");
-    }
-  };
-
-  return (
-    <button onClick={handleVerifyClick}>
-      Verify Identity
-    </button>
-  );
-};
-```
-
-### Step 3: Submit Proof for On-Chain Verification (Backend)
-
-The user's wallet handles the proof generation and submission transparently. The wallet will exercise a choice that consumes the `VerificationRequest` and calls the core `Verifier` contract. Your dApp doesn't need to handle the raw ZK proof itself.
-
-Instead, your Daml model should define what happens *after* a successful verification. The standard pattern is to create a dApp-specific `VerifiedUser` contract that grants the user permissions within your application.
-
-## Daml Integration Example
-
-Here is an example of a Daml model for a DeFi application that requires users to be KYC'd before they can trade.
+**From your dApp's Daml backend or trigger:**
 
 ```daml
--- file: daml/MyDapp/Roles.daml
-module MyDapp.Roles where
+-- In a script or trigger acting as the Verifier
+module MyDapp.Onboarding where
 
 import Daml.Script
-import Canton.Identity.Verification (VerificationRequest)
+import ShieldedIdentity.Verification.Request qualified as Request
 
--- | A role contract created for a user once their identity has been
--- | successfully verified via the Shielded Identity protocol.
--- | The existence of this contract grants them access to the dApp's features.
-template VerifiedUserRole
-  with
-    dappOperator : Party
-    user         : Party
-  where
-    signatory dappOperator, user
-
-    key (dappOperator, user) : (Party, Party)
-    maintainer key._1
-
--- | This is the controller contract for your dApp's verification logic.
--- | It observes VerificationRequests and, upon successful proof submission
--- | by the user, creates the `VerifiedUserRole`.
-template DappVerificationController
-  with
-    dappOperator: Party
-  where
-    signatory dappOperator
-
-    -- When a user's wallet successfully verifies their credential against a request,
-    -- this choice is called by the Shielded Identity workflow.
-    nonconsuming choice OnVerificationSuccess : ContractId VerifiedUserRole
-      with
-        request : VerificationRequest
-      controller (signatory request.user) -- This choice is exercised by the user's wallet
-      do
-        -- Ensure the request was intended for this dApp instance.
-        request.dappOperator === dappOperator
-
-        -- The core ZK proof verification logic is handled by the contracts called
-        // by the user's wallet *before* this choice is exercised.
-        // If we have reached this point, verification was successful.
-
-        -- Create the dApp-specific role for the user.
-        create VerifiedUserRole with
-          dappOperator = dappOperator
-          user = request.user
+-- | verifierParty: Your dApp's party ID
+-- | subjectParty: The user's party ID
+createVerificationRequest: Party -> Party -> Script (ContractId Request.T)
+createVerificationRequest verifierParty subjectParty = do
+  submit verifierParty do
+    createCmd Request.T with
+      verifier = verifierParty
+      subject = subjectParty
 ```
 
-In this model:
-1.  Your dApp's operator party creates a `DappVerificationController`.
-2.  Your frontend creates a `Canton.Identity.Verification.VerificationRequest` pointing to your `dappOperator`.
-3.  The user's wallet detects the request, generates the proof, and calls a choice that ultimately calls `OnVerificationSuccess` on your `DappVerificationController`.
-4.  If the proof is valid and the credential is not revoked, the transaction succeeds, and a `VerifiedUserRole` contract is created on the ledger, observable by both your dApp and the user.
+This contract is signed by your dApp (`verifier`) and is visible to the `subject`.
 
-## Security Considerations
+### Step 2: User Presents Proof
 
--   **Replay Attacks:** The protocol is designed to be replay-resistant. Each `VerificationRequest` contains a unique `nonce` and is consumed upon use, ensuring a proof can only be used once for a specific request.
--   **Proof Privacy:** The ZK proofs are non-interactive and reveal nothing about the user's PII or their issuing institution. The ledger only records the fact of a successful verification event.
--   **Revocation:** The on-chain verification logic atomically checks the issuer's current revocation list as part of every verification. If a user's credential has been revoked, proof verification will fail.
+The user's CIP-0103 compliant wallet will automatically detect the `VerificationRequest`. The user will see a prompt in their wallet asking for permission to prove their KYC status to your application.
 
-## Frequently Asked Questions
+Upon approval, the wallet exercises the `PresentProof` choice on the `VerificationRequest`. This is the core of the zero-knowledge interaction. The user provides their `KycCredential` contract ID to the choice. The choice logic, running atomically on the Canton ledger, does the following:
+1.  Fetches the user's `KycCredential`.
+2.  Asserts that the credential is valid (not expired, not revoked).
+3.  Asserts that the owner of the credential is the `subject` of the request.
+4.  If all checks pass, it archives the `VerificationRequest` and creates a `VerificationReceipt`.
 
-**Q: Which identity issuers can I trust?**
-A: The Canton Network maintains a registry of trusted issuing institutions. Your dApp can configure its policy to accept credentials from all registered issuers or a specific subset.
+Crucially, as the Verifier, your party does not gain visibility into the `KycCredential` contract itself. You only see the final result: the `VerificationReceipt`.
 
-**Q: What happens if a user's KYC status is revoked after they have been verified in my dApp?**
-A: The `VerifiedUserRole` contract in your dApp is a point-in-time confirmation. It does not automatically update if the user's underlying credential is revoked. For long-running sessions or high-value transactions, you may require users to re-verify periodically.
+### Step 3: Confirm Receipt and Grant Access
 
-**Q: Can I request verification of specific attributes, like "over 18" or "country of residence"?**
-A: Yes. The protocol is extensible. The `VerificationRequest` can specify the exact claim you need the user to prove (e.g., `Attribute("age", ">=18")`). The user's wallet will generate a proof for that specific claim if their credential contains it.
+Your dApp can now confirm that the user is verified by looking for an active `VerificationReceipt` contract. You can query the ledger for a receipt where the `verifier` is your dApp and the `subject` is the user.
 
-**Q: What underlying ZK-SNARK technology is used?**
-A: The protocol currently uses Groth16 proofs over the BN254 curve for maximum efficiency and security, but is designed to be crypto-agile to support future proofing systems.
+A common pattern is to require the `ContractId` of the receipt as an argument to choices that control access to sensitive features.
+
+```daml
+-- In your dApp's main contract module
+module MyDapp.Asset where
+
+import ShieldedIdentity.Verification.Receipt qualified as Receipt
+
+template Token
+  with
+    owner: Party
+    issuer: Party
+    -- other fields
+  where
+    signatory issuer, owner
+
+    -- This choice is gated by a valid KYC receipt
+    choice TransferToVerified : ContractId Token
+      with
+        newOwner: Party
+        receiptCid: ContractId Receipt.T
+      controller owner
+      do
+        -- Fetch the receipt to ensure it's valid for the newOwner
+        receipt <- fetch receiptCid
+        assertMsg "New owner must be KYC-verified with this platform"
+          (receipt.verifier == issuer && receipt.subject == newOwner)
+
+        create this with owner = newOwner
+```
+
+The presence of this active contract is the definitive proof of KYC. Your application can grant access to the restricted feature.
+
+## Handling Credential Revocation
+
+The Canton Shielded Identity model has built-in support for credential revocation. If an Issuer revokes a user's underlying `KycCredential`, the system ensures that any `VerificationReceipt` derived from it is also invalidated.
+
+This is handled by a choice on the `KycCredential` template that, when exercised by the Issuer, archives the credential and creates a `RevocationProof`. The `VerificationReceipt` template includes a non-consuming choice `CheckRevocation` that your dApp can call. This choice attempts to find a corresponding `RevocationProof` contract for the original credential.
+
+Your dApp's automation (e.g., a Canton Trigger) should periodically run `CheckRevocation` on active `VerificationReceipt` contracts to ensure they remain valid. If a credential has been revoked, the choice will archive the `VerificationReceipt`, automatically and atomically revoking the user's access to your dApp's gated features.
+
+## Frontend & UI Integration
+
+Your frontend application will typically interact with a JSON API layer that communicates with the Canton ledger.
+
+1.  **Check Status:** When a user connects their wallet, query your backend to see if a `VerificationReceipt` already exists for their party ID and your dApp's verifier ID.
+    *   **If YES:** Display a "Verified" status.
+    *   **If NO:** Display a "Verification Required" button.
+2.  **Initiate Verification:** When the user clicks the verification button, your frontend calls an endpoint that triggers the creation of the `VerificationRequest` contract on the ledger (Step 1).
+3.  **Poll for Result:** After creating the request, your frontend should poll your backend (or use a WebSocket/stream) to wait for the corresponding `VerificationReceipt` to appear on the ledger.
+4.  **Update UI:** Once the receipt is detected, update the UI to "Verified" and unlock the relevant features.
+
+## FAQ
+
+**Q: Do I ever see the user's name, date of birth, or other PII?**
+A: No. The entire system is designed so that you, the Verifier, learn only one fact: that a trusted Issuer has successfully verified this user according to a specific standard. You never see the underlying personal data.
+
+**Q: Which institutions can be Issuers?**
+A: The list of trusted Issuers is managed at the network or application level. The model can be configured so your dApp only accepts proofs derived from credentials issued by a specific, allow-listed set of trusted parties.
+
+**Q: What happens if a user's `VerificationRequest` is never acted upon?**
+A: The `VerificationRequest` is a standing invitation. It remains on the ledger until the user either accepts it (by exercising `PresentProof`) or you decide to archive it. It has no built-in expiry.
+
+**Q: Can a `VerificationReceipt` be transferred?**
+A: No. The `VerificationReceipt` is tied specifically to your dApp's `verifier` party and the user's `subject` party. It is non-transferable and cannot be used to prove identity to another dApp. Each Verifier must issue their own `VerificationRequest`.
