@@ -1,30 +1,38 @@
-name: Canton Shielded Identity CI
+name: CI
 
 on:
   push:
-    branches: [ "main", "master" ]
+    branches: [ "main" ]
   pull_request:
-    branches: [ "main", "master" ]
+    branches: [ "main" ]
 
 jobs:
-  build-and-test-daml:
-    name: Build and Test Daml Contracts
+  build-and-test:
+    name: Build & Test Daml Contracts
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install DPM (Daml Package Manager)
+      - name: Set up DPM Cache
+        id: cache-dpm
+        uses: actions/cache@v4
+        with:
+          path: ~/.dpm
+          key: ${{ runner.os }}-dpm-v1-${{ hashFiles('**/daml.yaml', '**/multi-package.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-dpm-v1-
+
+      - name: Install DPM
+        if: steps.cache-dpm.outputs.cache-hit != 'true'
         run: curl https://get.digitalasset.com/install/install.sh | sh
 
       - name: Add DPM to PATH
         run: echo "$HOME/.dpm/bin" >> $GITHUB_PATH
 
-      - name: Verify DPM installation
-        run: dpm --version
-
-      - name: Build Daml contracts
+      - name: Build contracts
         run: dpm build
 
-      - name: Run Daml tests
+      - name: Run credential issuance and verification tests
         run: dpm test
