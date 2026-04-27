@@ -1,226 +1,236 @@
-// Copyright (c) 2024 Digital Asset (Switzerland) GmbH and/or its affiliates. All rights reserved.
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file Canton Shielded Identity SDK Client
+ * @copyright 2024 Digital Asset (Canton) LLC
+ * @license Apache-2.0
+ */
 
-import { ContractId, Party } from '@c7/base';
-import { Ledger } from '@c7/ledger';
-import { CredentialProof } from './gen/Identity/CredentialProof';
-import { IssuerRegistry } from './gen/Identity/IssuerRegistry';
-import { VerificationRequest, VerifiedIdentity } from './gen/Identity/VerificationRequest';
-import { RevocationNotification } from './gen/Identity/Revocation';
+// Basic types for interacting with a Daml Ledger's JSON API.
+export type Party = string;
+export type ContractId<T = any> = string;
 
-// Re-exporting generated types for convenience of the SDK user
-export { CredentialProof } from './gen/Identity/CredentialProof';
-export { IssuerRegistry } from './gen/Identity/IssuerRegistry';
-export { VerificationRequest, VerifiedIdentity } from './gen/Identity/VerificationRequest';
-export { RevocationNotification } from './gen/Identity/Revocation';
+/**
+ * Represents a generic active contract fetched from the JSON API.
+ */
+export interface ActiveContract<T = any> {
+  contractId: ContractId<T>;
+  templateId: string;
+  payload: T;
+  // Other fields like agreementText, signatories, observers are omitted for brevity.
+}
 
-// Type aliases for contract IDs to improve readability
-export type CredentialProofId = ContractId<CredentialProof>;
-export type VerificationRequestId = ContractId<VerificationRequest>;
-export type IssuerRegistryId = ContractId<IssuerRegistry>;
-export type VerifiedIdentityId = ContractId<VerifiedIdentity>;
+/**
+ * Represents an error response from the JSON API.
+ */
+export interface LedgerError {
+  status: number;
+  errors: string[];
+}
 
 /**
  * Configuration for the CredentialClient.
  */
 export interface CredentialClientConfig {
-  /** The ledger instance to connect to, e.g., from `@c7/ledger-json-api`. */
-  readonly ledger: Ledger;
-  /** The party ID of the user acting. All commands will be submitted as this party. */
-  readonly party: Party;
+  /** The base URL of the Daml Ledger JSON API (e.g., http://localhost:7575). */
+  ledgerUrl: string;
+  /** A JWT token used to authorize requests, scoped to a specific party. */
+  partyToken: string;
+  /** The acting party for the requests made by this client instance. */
+  party: Party;
+  /** The package ID of the deployed shielded-identity Daml models. */
+  templatePackageId: string;
 }
 
 /**
- * A TypeScript SDK client for interacting with the Canton Shielded Identity contracts.
- * This client provides a high-level API for issuers, verifiers (dApps), and users
- * to manage and use zero-knowledge KYC credentials on a Canton network.
+ * A TypeScript client for interacting with the Canton Shielded Identity contracts
+ * over the Daml Ledger JSON API. This SDK simplifies creating, issuing, verifying,
+ * and revoking KYC credentials.
+ *
+ * Each instance of the client is authenticated for a single party.
  */
 export class CredentialClient {
-  private readonly ledger: Ledger;
-  private readonly party: Party;
+  private readonly config: CredentialClientConfig;
+  private readonly authHeaders: { Authorization: string; "Content-Type": string; };
+  private readonly modulePrefix: string;
 
   /**
    * Constructs a new CredentialClient.
-   * @param config Configuration for the client, including the ledger connection and acting party.
+   * @param config - The configuration object for the client.
    */
   constructor(config: CredentialClientConfig) {
-    this.ledger = config.ledger;
-    this.party = config.party;
+    if (!config.ledgerUrl || !config.partyToken || !config.party || !config.templatePackageId) {
+      throw new Error("CredentialClient requires ledgerUrl, partyToken, party, and templatePackageId in its configuration.");
+    }
+    this.config = config;
+    this.authHeaders = {
+      "Authorization": `Bearer ${this.config.partyToken}`,
+      "Content-Type": "application/json",
+    };
+    this.modulePrefix = `${this.config.templatePackageId}:Canton.Shielded.Identity.`;
   }
 
-  // =================================================================================
-  // Issuer Registry Methods (typically for registry operators)
-  // =================================================================================
+  // ---------------------------------------------------------------------------------
+  // Private Ledger Interaction Helpers
+  // ---------------------------------------------------------------------------------
+
+  private async post<T>(endpoint: string, body: object): Promise<T> {
+    const url = `${this.config.ledgerUrl}${endpoint}`;
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: this.authHeaders,
+        body: JSON.stringify(body),
+      });
+
+      if (!response.ok) {
+        const errorPayload: LedgerError = await response.json();
+        const errorMsg = `Ledger API request failed with status ${response.status}: ${errorPayload.errors.join(", ")}`;
+        console.error(errorMsg, { url, body, errorPayload });
+        throw new Error(errorMsg);
+      }
+
+      const result = await response.json();
+      return result.result as T;
+    } catch (error) {
+      console.error(`Network or other error during fetch to ${url}:`, error);
+      throw error;
+    }
+  }
+
+  private create<T>(templateName: string, payload: T): Promise<{ contractId: ContractId }> {
+    return this.post<{ contractId: ContractId }>('/v1/create', {
+      templateId: `${this.modulePrefix}${templateName}`,
+      payload,
+    });
+  }
+
+  private exercise<T>(templateName: string, contractId: ContractId, choiceName: string, argument: T): Promise<any> {
+    return this.post('/v1/exercise', {
+      templateId: `${this.modulePrefix}${templateName}`,
+      contractId,
+      choice: choiceName,
+      argument,
+    });
+  }
+
+  private query<T>(templateName: string, query?: object): Promise<ActiveContract<T>[]> {
+    return this.post<ActiveContract<T>[]>('/v1/query', {
+      templateIds: [`${this.modulePrefix}${templateName}`],
+      query,
+    });
+  }
+
+  // ---------------------------------------------------------------------------------
+  // Public SDK Methods - Credential Issuance Workflow
+  // ---------------------------------------------------------------------------------
 
   /**
-   * Finds the singleton `IssuerRegistry` contract on the ledger.
-   * This registry is the central source of truth for trusted identity issuers.
-   * @returns The active `IssuerRegistry` contract event, or `null` if it's not found or not visible to the acting party.
+   * A user requests a KYC credential from a trusted issuer.
+   * This creates a `CredentialRequest` contract on the ledger.
+   * @param issuer - The `Party` ID of the issuer (e.g., a bank).
+   * @param personalDataHash - A SHA-256 hash of the user's personal identifying information,
+   *                           provided off-ledger to the issuer for verification.
+   * @returns The contract ID of the newly created `CredentialRequest`.
    */
-  public async findRegistry(): Promise<IssuerRegistry.CreateEvent | null> {
-    const contracts = await this.ledger.query(IssuerRegistry.template);
-    return contracts.length > 0 ? contracts[0] : null;
+  public async requestCredential(issuer: Party, personalDataHash: string): Promise<ContractId> {
+    const payload = {
+      user: this.config.party,
+      issuer,
+      personalDataHash,
+    };
+    const result = await this.create('Main:CredentialRequest', payload);
+    return result.contractId;
   }
 
   /**
-   * Registers a new identity issuer with the central registry.
-   * This action must be performed by the party designated as the `operator` of the `IssuerRegistry`.
-   * @param registryId The contract ID of the `IssuerRegistry`.
-   * @param newIssuer The party ID of the new issuer to add.
+   * An issuer fetches all pending credential requests addressed to them.
+   * @returns An array of active `CredentialRequest` contracts.
+   */
+  public async getPendingCredentialRequests(): Promise<ActiveContract[]> {
+    return this.query('Main:CredentialRequest', { issuer: this.config.party });
+  }
+
+  /**
+   * An issuer approves a credential request after off-ledger verification,
+   * creating a `KycCredential` contract for the user.
+   * @param requestCid - The contract ID of the `CredentialRequest` to approve.
+   * @param subject - The Party ID of the user receiving the credential.
+   * @param expiryDate - The credential's expiration date in ISO 8601 format (e.g., "2025-12-31").
+   * @returns The result of the exercise command, including the created `KycCredential` contract ID.
+   */
+  public async issueCredential(requestCid: ContractId, subject: Party, expiryDate: string): Promise<any> {
+    const argument = {
+      subject,
+      expiryDate,
+    };
+    return this.exercise('Main:CredentialRequest', requestCid, 'Issue', argument);
+  }
+
+  /**
+   * A user fetches their own active KYC credential.
+   * @returns The active `KycCredential` contract, or null if none exists.
+   */
+  public async getMyCredential(): Promise<ActiveContract | null> {
+    const credentials = await this.query('Main:KycCredential', { owner: this.config.party });
+    return credentials.length > 0 ? credentials[0] : null;
+  }
+
+  /**
+   * An issuer revokes a previously issued credential.
+   * @param credentialCid - The contract ID of the `KycCredential` to revoke.
+   * @param reason - A textual reason for the revocation.
    * @returns The result of the exercise command.
    */
-  public async registerIssuer(registryId: IssuerRegistryId, newIssuer: Party): Promise<unknown> {
-    return this.ledger.exercise(IssuerRegistry.RegisterIssuer, registryId, { newIssuer });
+  public async revokeCredential(credentialCid: ContractId, reason: string): Promise<any> {
+    return this.exercise('Main:KycCredential', credentialCid, 'Revoke', { reason });
   }
 
-  // =================================================================================
-  // Issuer Methods (for banks, financial institutions, etc.)
-  // =================================================================================
+  // ---------------------------------------------------------------------------------
+  // Public SDK Methods - Verification Workflow
+  // ---------------------------------------------------------------------------------
 
   /**
-   * Issues a new KYC credential to a user.
-   * This action must be performed by a party that is registered as an issuer in the `IssuerRegistry`.
-   * @param owner The party ID of the user receiving the credential.
-   * @param verifiers A list of parties (dApps) who are explicitly allowed to view and verify this credential.
-   * @param credentialId A unique, off-ledger identifier for this credential (e.g., a UUID). Used for revocation checking.
-   * @param proofData The cryptographic zero-knowledge proof data, represented as a string.
-   * @param validUntil An ISO 8601 timestamp string indicating when the credential expires.
-   * @returns The created `CredentialProof` contract event.
+   * A verifier (e.g., a dApp) initiates a KYC check for a specific user.
+   * This creates a `VerificationRequest` contract on the ledger.
+   * @param subject - The party whose identity needs to be verified.
+   * @returns The contract ID of the newly created `VerificationRequest`.
    */
-  public async issueCredential(
-    owner: Party,
-    verifiers: Party[],
-    credentialId: string,
-    proofData: string,
-    validUntil: string
-  ): Promise<CredentialProof.CreateEvent> {
-    const payload: CredentialProof.Create = {
-      issuer: this.party,
-      owner,
-      verifiers,
-      credentialId,
-      proofData,
-      validUntil,
+  public async initiateVerification(subject: Party): Promise<ContractId> {
+    const payload = {
+      verifier: this.config.party,
+      subject,
     };
-    return this.ledger.create(CredentialProof.template, payload);
+    const result = await this.create('Verification:VerificationRequest', payload);
+    return result.contractId;
   }
 
   /**
-   * Revokes a user's credential by creating a `RevocationNotification` on the ledger.
-   * The presence of this notification contract signals that the original credential is no longer valid.
-   * The `PresentProof` choice logic will check for this notification using a contract key lookup.
-   * @param owner The party ID of the user whose credential is being revoked. They are made an observer on the notification.
-   * @param credentialId The unique off-ledger ID of the credential to revoke.
-   * @returns The created `RevocationNotification` contract event.
+   * A user fetches all pending verification requests that require their action.
+   * @returns An array of active `VerificationRequest` contracts where this user is the subject.
    */
-  public async revokeCredential(
-    owner: Party,
-    credentialId: string
-  ): Promise<RevocationNotification.CreateEvent> {
-    const payload: RevocationNotification.Create = {
-      issuer: this.party,
-      owner,
-      credentialId,
-    };
-    return this.ledger.create(RevocationNotification.template, payload);
+  public async getMyPendingVerifications(): Promise<ActiveContract[]> {
+    return this.query('Verification:VerificationRequest', { subject: this.config.party });
   }
 
   /**
-   * Checks if a credential has been revoked by looking up its corresponding `RevocationNotification`.
-   * @param issuer The party who issued the credential.
-   * @param credentialId The unique off-ledger ID of the credential.
-   * @returns `true` if a revocation notification exists, `false` otherwise.
+   * A user responds to a verification request by presenting their credential.
+   * This choice atomically consumes the request and the credential, creating a
+   * `VerificationReceipt` for the verifier and a fresh `KycCredential` for the user.
+   * The verifier learns only that the verification succeeded, not who the issuer was.
+   * @param verificationRequestCid - The contract ID of the `VerificationRequest`.
+   * @param credentialCid - The contract ID of the user's `KycCredential`.
+   * @returns The result of the exercise command, including the receipt and new credential IDs.
    */
-  public async isRevoked(issuer: Party, credentialId: string): Promise<boolean> {
-    const key: RevocationNotification.Key = { _1: issuer, _2: credentialId };
-    const notification = await this.ledger.lookupByKey(RevocationNotification.template, key);
-    return notification !== null;
-  }
-
-  // =================================================================================
-  // dApp/Verifier Methods
-  // =================================================================================
-
-  /**
-   * Requests a KYC verification from a user, creating a `VerificationRequest` contract.
-   * The user's wallet will detect this contract and prompt the user to respond.
-   * @param user The party ID of the user to verify.
-   * @param nonce A unique string (e.g., a session ID or cryptographically secure random value) to prevent replay attacks.
-   * @param registryId The contract ID of the `IssuerRegistry` to be used for validating the credential's issuer.
-   * @returns The created `VerificationRequest` contract event.
-   */
-  public async requestVerification(
-    user: Party,
-    nonce: string,
-    registryId: IssuerRegistryId
-  ): Promise<VerificationRequest.CreateEvent> {
-    const payload: VerificationRequest.Create = {
-      verifier: this.party,
-      user,
-      nonce,
-      registryId,
-    };
-    return this.ledger.create(VerificationRequest.template, payload);
-  }
-
-  // =================================================================================
-  // User/Holder Methods (typically called from a user's wallet)
-  // =================================================================================
-
-  /**
-   * Presents a credential proof in response to a `VerificationRequest`.
-   * This action is performed by the user who owns the credential. It consumes the request
-   * and, if successful, creates a `VerifiedIdentity` contract as evidence of successful verification.
-   * @param verificationRequestId The contract ID of the `VerificationRequest` to respond to.
-   * @param credentialId The contract ID of the `CredentialProof` to present.
-   * @returns The contract ID of the resulting `VerifiedIdentity` contract.
-   */
-  public async presentProof(
-    verificationRequestId: VerificationRequestId,
-    credentialId: CredentialProofId
-  ): Promise<VerifiedIdentityId> {
-    const choiceArgs = { credentialId };
-    return this.ledger.exercise(
-      VerificationRequest.PresentProof,
-      verificationRequestId,
-      choiceArgs
-    );
-  }
-
-  // =================================================================================
-  // Query Methods (for all roles)
-  // =================================================================================
-
-  /**
-   * Fetches a specific `CredentialProof` contract by its contract ID.
-   * @param credentialId The contract ID to fetch.
-   * @returns The contract data, or `null` if not found or not visible to the acting party.
-   */
-  public async getCredential(credentialId: CredentialProofId): Promise<CredentialProof.CreateEvent | null> {
-    return this.ledger.fetch(CredentialProof.template, credentialId);
+  public async presentCredential(verificationRequestCid: ContractId, credentialCid: ContractId): Promise<any> {
+    return this.exercise('Verification:VerificationRequest', verificationRequestCid, 'Present', { credentialCid });
   }
 
   /**
-   * Lists all active credentials for which the acting party is the owner.
-   * @returns An array of active `CredentialProof` contract events.
+   * A verifier or user fetches the verification receipts they are privy to.
+   * @returns An array of `VerificationReceipt` contracts.
    */
-  public async listMyCredentials(): Promise<CredentialProof.CreateEvent[]> {
-    return this.ledger.query(CredentialProof.template, { owner: this.party });
-  }
-
-  /**
-   * Lists all pending verification requests where the acting party is the user.
-   * @returns An array of active `VerificationRequest` contract events.
-   */
-  public async listMyVerificationRequests(): Promise<VerificationRequest.CreateEvent[]> {
-    return this.ledger.query(VerificationRequest.template, { user: this.party });
-  }
-
-  /**
-   * Lists all successful verifications for which the acting party is the verifier.
-   * @returns An array of active `VerifiedIdentity` contract events.
-   */
-  public async listMyVerifications(): Promise<VerifiedIdentity.CreateEvent[]> {
-    return this.ledger.query(VerifiedIdentity.template, { verifier: this.party });
+  public async getVerificationReceipts(): Promise<ActiveContract[]> {
+    // A verifier or subject can query for receipts they are involved in.
+    // The query is implicitly scoped to the party making the call.
+    return this.query('Verification:VerificationReceipt');
   }
 }
