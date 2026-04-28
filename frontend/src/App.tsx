@@ -1,325 +1,430 @@
-import React, { useState, useEffect } from 'react';
-import { DamlLedger, useParty, useLedger, useQuery } from '@c7/react';
+import React, { useState, useEffect, useMemo } from 'react';
+import { DamlLedger, useParty, useLedger, useStreamQueries, ContractId } from '@c7/react';
 import { CredentialStatus } from './CredentialStatus';
-import { Credential, IssuanceProposal } from '@canton-shielded-identity/daml-codegen/lib/Main';
-import { ContractId } from '@c7/dabl';
+import './App.css'; // Assuming some basic CSS for styling
 
-import './App.css';
+const HTTP_URL = "http://localhost:7575";
+const LEDGER_ID = "sandbox"; // Default for dpm sandbox
 
-// --- Constants & Mock Data --------------------------------------------------
-// In a real application, these would be managed securely and dynamically.
-const LEDGER_URL = 'http://localhost:7575';
+// --- Mock Parties for Demo ---
+const ISSUER_PARTY_NAME = "GlobalTrustBank";
+const VERIFIER_PARTY_NAME = "TradeShiftDApp";
+const USER_PARTY_NAME = "Alice";
 
-// Mock party identifiers. Replace with actual parties from your ledger.
-const ISSUER_BANK_PARTY = { name: "GlobalTrust Bank", id: "GlobalTrustBank::1220c1a2f2671b563a6f112e457f5115d78a2d12f2070e65c26b5413110298a05e22" };
-const VERIFIER_DAPP_PARTY = { name: "DeFiLend dApp", id: "DeFiLend::1220a3b3f3782c564a7f232e568f6225e89b3e13f3171f76d37c65242213a9b16f33" };
-const HOLDER_ALICE_PARTY = { name: "Alice", id: "Alice::1220e4b4f4893e565a8f442e679f7335f9ac4f24f4272e86e48d76352324b9c27f44" };
-const HOLDER_BOB_PARTY = { name: "Bob", id: "Bob::1220d5c5e5904f676b9f563e780a7446g0bd5g35g5373f97h59e87463435c0d38g55" };
+// --- Daml Type Definitions (Manually created for frontend) ---
+// These should correspond to your Daml models.
 
-const ALL_PARTIES = [ISSUER_BANK_PARTY, VERIFIER_DAPP_PARTY, HOLDER_ALICE_PARTY, HOLDER_BOB_PARTY];
-const POTENTIAL_CREDENTIAL_HOLDERS = [HOLDER_ALICE_PARTY, HOLDER_BOB_PARTY];
-
-// --- Authentication Helper -------------------------------------------------
-// In production, use a proper authentication provider (e.g., OAuth2/OIDC).
-// This function creates a placeholder JWT for a given party.
-const generateToken = (partyId: string) => {
-  const header = { alg: "HS256", typ: "JWT" };
-  const payload = {
-    "https://daml.com/ledger-api": {
-      ledgerId: "canton-shielded-identity-sandbox",
-      applicationId: "canton-shielded-identity-app",
-      actAs: [partyId],
-    },
-  };
-  const encode = (data: object) => btoa(JSON.stringify(data)).replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_');
-  return `${encode(header)}.${encode(payload)}.signature`;
+type KycRequest = {
+  holder: string;
+  issuer: string;
 };
 
-// --- Sub-components for different user roles -------------------------------
+type KycCredential = {
+  holder: string;
+  issuer: string;
+  issuedAt: string; // ISO 8601 Timestamp
+};
 
-const LoginScreen: React.FC<{ onLogin: (partyId: string, token: string, name: string) => void }> = ({ onLogin }) => (
-  <div className="login-container">
-    <h1>Canton Shielded Identity Portal</h1>
-    <p>Select your role to log in to the portal.</p>
-    <div className="party-selection">
-      {ALL_PARTIES.map(party => (
-        <button key={party.id} onClick={() => onLogin(party.id, generateToken(party.id), party.name)}>
-          Log in as {party.name}
-        </button>
-      ))}
-    </div>
-  </div>
-);
+type VerificationRequest = {
+  verifier: string;
+  holder: string;
+  purpose: string;
+};
 
-const IssuerView: React.FC = () => {
-  const ledger = useLedger();
-  const issuerParty = useParty();
-  const { contracts: proposals, loading: proposalsLoading } = useQuery(IssuanceProposal.Template);
-  const { contracts: credentials, loading: credentialsLoading } = useQuery(Credential.Template);
+type VerificationProof = {
+  verifier: string;
+  holder: string;
+  verifiedAt: string; // ISO 8601 Timestamp
+};
 
-  const issuedToParties = new Set(credentials.map(c => c.payload.holder));
+// --- Main App Component ---
 
-  const handleIssueCredential = async (holderPartyId: string) => {
-    try {
-      await ledger.create(IssuanceProposal.Template, {
-        issuer: issuerParty,
-        holder: holderPartyId,
-      });
-      alert(`Credential proposal sent to ${holderPartyId}`);
-    } catch (error) {
-      console.error("Failed to issue credential:", error);
-      alert("Failed to issue credential.");
+const App: React.FC = () => {
+  const [token, setToken] = useState<string | null>(localStorage.getItem("daml-token"));
+
+  useEffect(() => {
+    if (token) {
+      localStorage.setItem("daml-token", token);
+    } else {
+      localStorage.removeItem("daml-token");
     }
-  };
+  }, [token]);
 
-  const handleRevokeCredential = async (cid: ContractId<Credential.Template>) => {
-    if (window.confirm("Are you sure you want to revoke this credential? This action is irreversible.")) {
-      try {
-        await ledger.exercise(Credential.Revoke, cid, {});
-        alert("Credential revoked successfully.");
-      } catch (error) {
-        console.error("Failed to revoke credential:", error);
-        alert("Failed to revoke credential.");
-      }
-    }
+  const logout = () => {
+    setToken(null);
   };
 
   return (
-    <div className="view-container issuer-view">
-      <h2>Issuer Dashboard (GlobalTrust Bank)</h2>
-
-      <div className="section">
-        <h3>Issue New Credential</h3>
-        <p>Select a user to issue a new KYC credential to. This creates a proposal that the user must accept.</p>
-        {(proposalsLoading || credentialsLoading) ? <p>Loading users...</p> : (
-          <ul className="user-list">
-            {POTENTIAL_CREDENTIAL_HOLDERS.map(holder => {
-              const isIssued = issuedToParties.has(holder.id);
-              const hasPendingProposal = proposals.some(p => p.payload.holder === holder.id);
-              return (
-                <li key={holder.id}>
-                  <span>{holder.name} ({holder.id.substring(0, 10)}...)</span>
-                  <button
-                    onClick={() => handleIssueCredential(holder.id)}
-                    disabled={isIssued || hasPendingProposal}
-                  >
-                    {isIssued ? "Issued" : hasPendingProposal ? "Proposal Sent" : "Issue Credential"}
-                  </button>
-                </li>
-              );
-            })}
-          </ul>
-        )}
-      </div>
-
-      <div className="section">
-        <h3>Active Credentials</h3>
-        {credentialsLoading ? <p>Loading credentials...</p> : (
-          credentials.length > 0 ? (
-            <ul className="credential-list">
-              {credentials.map(cred => (
-                <li key={cred.contractId}>
-                  <p><strong>Holder:</strong> {cred.payload.holder}</p>
-                  <p><strong>Status:</strong> {cred.payload.isRevoked ? "Revoked" : "Active"}</p>
-                  <p><strong>Issued At:</strong> {new Date(cred.payload.issuedAt).toLocaleString()}</p>
-                  {!cred.payload.isRevoked && (
-                    <button className="danger" onClick={() => handleRevokeCredential(cred.contractId)}>Revoke</button>
-                  )}
-                </li>
-              ))}
-            </ul>
-          ) : <p>No credentials issued yet.</p>
-        )}
-      </div>
-    </div>
-  );
-};
-
-const HolderView: React.FC = () => {
-  const ledger = useLedger();
-  const party = useParty();
-  const { contracts: proposals, loading: proposalsLoading } = useQuery(IssuanceProposal.Template);
-  const { contracts: credentials, loading: credentialsLoading } = useQuery(Credential.Template);
-
-  const myProposal = proposals.find(p => p.payload.holder === party);
-  const myCredential = credentials.find(c => c.payload.holder === party);
-
-  const handleAcceptProposal = async (cid: ContractId<IssuanceProposal.Template>) => {
-    try {
-      await ledger.exercise(IssuanceProposal.Accept, cid, {});
-      alert("Credential accepted successfully!");
-    } catch (error) {
-      console.error("Failed to accept proposal:", error);
-      alert("Failed to accept proposal.");
-    }
-  };
-
-  return (
-    <div className="view-container holder-view">
-      <h2>Credential Holder Dashboard</h2>
-      {myProposal && (
-        <div className="section proposal-card">
-          <h3>New Credential Proposal</h3>
-          <p><strong>From:</strong> {myProposal.payload.issuer}</p>
-          <p>You have received a proposal to issue a shielded KYC credential. Accept to activate your credential.</p>
-          <button onClick={() => handleAcceptProposal(myProposal.contractId)}>Accept</button>
-        </div>
-      )}
-      {(proposalsLoading || credentialsLoading)
-        ? <p>Loading credential status...</p>
-        : <CredentialStatus credential={myCredential} />
-      }
-    </div>
-  );
-};
-
-const VerifierView: React.FC = () => {
-  const ledger = useLedger();
-  const [verificationTarget, setVerificationTarget] = useState('');
-  const [verificationResult, setVerificationResult] = useState<string | null>(null);
-  const [isLoading, setIsLoading] = useState(false);
-
-  const handleVerify = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setIsLoading(true);
-    setVerificationResult(null);
-
-    // --- ZK PROOF SIMULATION ---
-    // In a real ZK system, this flow would be different:
-    // 1. The Holder (Alice) would generate a ZK proof off-chain.
-    // 2. Alice would send this proof to the Verifier (dApp).
-    // 3. The Verifier would check the proof's validity off-chain.
-    // 4. The proof would contain a "nullifier hash", which is a unique, un-linkable value
-    //    that is revealed when a credential is used.
-    // 5. The Verifier would exercise a `Verify` choice on a public contract, submitting the nullifier hash.
-    //    The ledger would ensure this hash hasn't been used before (preventing double-spending)
-    //    and that the credential it corresponds to has not been revoked.
-    //
-    // For this demo, we simplify by allowing the Verifier to directly check a credential ID.
-    // This breaks the privacy model but demonstrates the on-ledger verification step.
-    try {
-      // In our simulation, verificationTarget is the ContractId of the credential.
-      const result = await ledger.exercise(Credential.Verify, verificationTarget, {});
-      if (result) {
-        setVerificationResult(`✅ Verification successful. The credential is active and valid.`);
-      }
-    } catch (error) {
-      console.error("Verification failed:", error);
-      setVerificationResult(`❌ Verification failed. The credential may be invalid, revoked, or the ID is incorrect.`);
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  return (
-    <div className="view-container verifier-view">
-      <h2>Verifier Dashboard (DeFiLend dApp)</h2>
-      <div className="section">
-        <h3>Verify a Credential</h3>
-        <p>
-          Enter the proof data (simulated as a Credential Contract ID) to verify a user's KYC status.
-        </p>
-        <form onSubmit={handleVerify}>
-          <input
-            type="text"
-            value={verificationTarget}
-            onChange={(e) => setVerificationTarget(e.target.value)}
-            placeholder="Enter Credential Contract ID for verification"
-            required
-          />
-          <button type="submit" disabled={isLoading}>
-            {isLoading ? "Verifying..." : "Verify"}
-          </button>
-        </form>
-        {verificationResult && (
-          <div className={`verification-result ${verificationResult.includes('successful') ? 'success' : 'error'}`}>
-            <p>{verificationResult}</p>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-};
-
-
-// --- Main Application Component ---------------------------------------------
-
-const MainPortal: React.FC = () => {
-  const party = useParty();
-  const partyInfo = ALL_PARTIES.find(p => p.id === party);
-
-  const renderView = () => {
-    switch (party) {
-      case ISSUER_BANK_PARTY.id:
-        return <IssuerView />;
-      case VERIFIER_DAPP_PARTY.id:
-        return <VerifierView />;
-      case HOLDER_ALICE_PARTY.id:
-      case HOLDER_BOB_PARTY.id:
-        return <HolderView />;
-      default:
-        return <p>Unknown party. Please log out and select a valid role.</p>;
-    }
-  };
-
-  return (
-    <div className="main-portal">
-      <header>
-        <h1>Canton Shielded Identity</h1>
-        <div className="user-info">
-          Logged in as: <strong>{partyInfo?.name || 'Unknown'}</strong>
-          <button className="logout" onClick={() => {
-            sessionStorage.removeItem('daml_party');
-            sessionStorage.removeItem('daml_token');
-            sessionStorage.removeItem('daml_name');
-            window.location.reload();
-          }}>
-            Log Out
-          </button>
-        </div>
+    <div style={styles.appContainer}>
+      <header style={styles.header}>
+        <h1 style={styles.headerTitle}>Canton Shielded Identity Portal</h1>
+        {token && <button onClick={logout} style={styles.logoutButton}>Logout</button>}
       </header>
-      <main>
-        {renderView()}
+      <main style={styles.mainContent}>
+        {!token ? (
+          <LoginScreen onLogin={setToken} />
+        ) : (
+          <DamlLedger token={token} party={token} httpUrl={HTTP_URL} ledgerId={LEDGER_ID}>
+            <MainScreen />
+          </DamlLedger>
+        )}
       </main>
     </div>
   );
 };
 
-const App: React.FC = () => {
-  const [party, setParty] = useState<string | null>(sessionStorage.getItem('daml_party'));
-  const [token, setToken] = useState<string | null>(sessionStorage.getItem('daml_token'));
-  const [, setName] = useState<string | null>(sessionStorage.getItem('daml_name'));
+// --- Login Screen ---
 
-  useEffect(() => {
-    setParty(sessionStorage.getItem('daml_party'));
-    setToken(sessionStorage.getItem('daml_token'));
-    setName(sessionStorage.getItem('daml_name'));
-  }, []);
-
-  const handleLogin = (partyId: string, userToken: string, userName: string) => {
-    sessionStorage.setItem('daml_party', partyId);
-    sessionStorage.setItem('daml_token', userToken);
-    sessionStorage.setItem('daml_name', userName);
-    setParty(partyId);
-    setToken(userToken);
-    setName(userName);
+const LoginScreen: React.FC<{ onLogin: (token: string) => void }> = ({ onLogin }) => {
+  const handleLogin = (partyName: string) => {
+    // In a real application, this would involve a call to an authentication
+    // server that returns a JWT. For this demo, we use the party name
+    // directly as the token, which works with an unauthenticated dpm sandbox.
+    onLogin(partyName);
   };
 
-  if (!token || !party) {
-    return (
-      <div className="App">
-        <LoginScreen onLogin={handleLogin} />
-      </div>
-    );
-  }
-
   return (
-    <div className="App">
-      <DamlLedger token={token} party={party} httpBaseUrl={LEDGER_URL}>
-        <MainPortal />
-      </DamlLedger>
+    <div style={styles.loginContainer}>
+      <h2 style={styles.loginTitle}>Select Your Role</h2>
+      <div style={styles.loginButtons}>
+        <button style={styles.button} onClick={() => handleLogin(USER_PARTY_NAME)}>
+          Login as {USER_PARTY_NAME} (User)
+        </button>
+        <button style={styles.button} onClick={() => handleLogin(ISSUER_PARTY_NAME)}>
+          Login as {ISSUER_PARTY_NAME} (Issuer)
+        </button>
+        <button style={styles.button} onClick={() => handleLogin(VERIFIER_PARTY_NAME)}>
+          Login as {VERIFIER_PARTY_NAME} (dApp Verifier)
+        </button>
+      </div>
     </div>
   );
+};
+
+// --- Main Screen (Post-Login) ---
+
+const MainScreen: React.FC = () => {
+  const party = useParty();
+
+  const renderView = () => {
+    if (party.includes(ISSUER_PARTY_NAME)) {
+      return <IssuerView />;
+    }
+    if (party.includes(VERIFIER_PARTY_NAME)) {
+      return <VerifierView />;
+    }
+    return <UserView />;
+  };
+
+  return (
+    <div>
+      <p style={styles.loggedInInfo}>Logged in as: <strong>{party}</strong></p>
+      {renderView()}
+    </div>
+  );
+};
+
+
+// --- User Role View ---
+
+const UserView: React.FC = () => {
+  const ledger = useLedger();
+  const party = useParty();
+
+  const { contracts: credentials, loading: loadingCredentials } = useStreamQueries(KycCredential, [{ holder: party }]);
+  const { contracts: requests, loading: loadingRequests } = useStreamQueries(KycRequest, [{ holder: party }]);
+  const { contracts: verificationRequests, loading: loadingVerificationRequests } = useStreamQueries(VerificationRequest, [{ holder: party }]);
+
+  const hasCredential = credentials.length > 0;
+  const hasPendingRequest = requests.length > 0;
+
+  const handleRequestCredential = async () => {
+    if (hasCredential || hasPendingRequest) return;
+    const payload: KycRequest = {
+      holder: party,
+      issuer: ISSUER_PARTY_NAME,
+    };
+    await ledger.create("ShieldedIdentity.Credential:KycRequest", payload);
+  };
+
+  const handlePresentProof = async (cid: ContractId<VerificationRequest>) => {
+    await ledger.exercise(VerificationRequest, cid, "PresentProof", {});
+  };
+
+  const handleDeclineVerification = async (cid: ContractId<VerificationRequest>) => {
+    await ledger.exercise(VerificationRequest, cid, "Decline", {});
+  };
+
+  return (
+    <div className="view-container">
+      <h2 style={styles.viewTitle}>My Identity</h2>
+      <CredentialStatus
+        credential={credentials[0]?.payload}
+        hasPendingRequest={hasPendingRequest}
+        loading={loadingCredentials || loadingRequests}
+      />
+      {!hasCredential && !hasPendingRequest && (
+        <button style={styles.button} onClick={handleRequestCredential}>
+          Request KYC Credential from {ISSUER_PARTY_NAME}
+        </button>
+      )}
+
+      <hr style={styles.hr} />
+
+      <h2 style={styles.viewTitle}>Verification Requests</h2>
+      {loadingVerificationRequests ? <p>Loading requests...</p> : (
+        verificationRequests.length === 0 ? <p>No pending verification requests.</p> : (
+          <ul style={styles.list}>
+            {verificationRequests.map(req => (
+              <li key={req.contractId} style={styles.listItem}>
+                <div>
+                  <p><strong>From:</strong> {req.payload.verifier}</p>
+                  <p><strong>Purpose:</strong> {req.payload.purpose}</p>
+                </div>
+                <div style={styles.buttonGroup}>
+                  <button style={{...styles.button, ...styles.buttonSuccess}} onClick={() => handlePresentProof(req.contractId)}>
+                    Accept & Present Proof
+                  </button>
+                  <button style={{...styles.button, ...styles.buttonDanger}} onClick={() => handleDeclineVerification(req.contractId)}>
+                    Decline
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )
+      )}
+    </div>
+  );
+};
+
+
+// --- Issuer Role View ---
+
+const IssuerView: React.FC = () => {
+  const ledger = useLedger();
+  const party = useParty();
+  const { contracts: requests, loading } = useStreamQueries(KycRequest, [{ issuer: party }]);
+
+  const handleApprove = async (cid: ContractId<KycRequest>) => {
+    await ledger.exercise(KycRequest, cid, "Approve", {});
+  };
+
+  const handleReject = async (cid: ContractId<KycRequest>) => {
+    await ledger.exercise(KycRequest, cid, "Reject", {});
+  };
+
+  return (
+    <div className="view-container">
+      <h2 style={styles.viewTitle}>Pending KYC Requests</h2>
+      {loading ? <p>Loading requests...</p> : (
+        requests.length === 0 ? <p>No pending requests.</p> : (
+          <ul style={styles.list}>
+            {requests.map(req => (
+              <li key={req.contractId} style={styles.listItem}>
+                <p><strong>Applicant:</strong> {req.payload.holder}</p>
+                <div style={styles.buttonGroup}>
+                  <button style={{...styles.button, ...styles.buttonSuccess}} onClick={() => handleApprove(req.contractId)}>Approve</button>
+                  <button style={{...styles.button, ...styles.buttonDanger}} onClick={() => handleReject(req.contractId)}>Reject</button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )
+      )}
+    </div>
+  );
+};
+
+// --- Verifier Role View ---
+
+const VerifierView: React.FC = () => {
+  const ledger = useLedger();
+  const party = useParty();
+  const [targetUser, setTargetUser] = useState(USER_PARTY_NAME);
+  const [purpose, setPurpose] = useState("Onboarding to TradeShift platform");
+
+  const { contracts: proofs, loading } = useStreamQueries(VerificationProof, [{ verifier: party }]);
+
+  const sortedProofs = useMemo(() => {
+    return proofs.sort((a, b) => new Date(b.payload.verifiedAt).getTime() - new Date(a.payload.verifiedAt).getTime());
+  }, [proofs]);
+
+  const handleVerify = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!targetUser || !purpose) {
+      alert("Please enter a user party and purpose.");
+      return;
+    }
+    const payload: VerificationRequest = {
+      verifier: party,
+      holder: targetUser,
+      purpose,
+    };
+    await ledger.create("ShieldedIdentity.Verification:VerificationRequest", payload);
+    alert(`Verification request sent to ${targetUser}`);
+  };
+
+  return (
+    <div className="view-container">
+      <h2 style={styles.viewTitle}>Request Identity Verification</h2>
+      <form onSubmit={handleVerify} style={styles.form}>
+        <div style={styles.formGroup}>
+          <label style={styles.label}>User Party ID</label>
+          <input
+            style={styles.input}
+            type="text"
+            value={targetUser}
+            onChange={e => setTargetUser(e.target.value)}
+          />
+        </div>
+        <div style={styles.formGroup}>
+          <label style={styles.label}>Purpose of Verification</label>
+          <input
+            style={styles.input}
+            type="text"
+            value={purpose}
+            onChange={e => setPurpose(e.target.value)}
+          />
+        </div>
+        <button type="submit" style={styles.button}>Send Verification Request</button>
+      </form>
+
+      <hr style={styles.hr} />
+
+      <h2 style={styles.viewTitle}>Successful Verifications</h2>
+      {loading ? <p>Loading proofs...</p> : (
+        sortedProofs.length === 0 ? <p>No successful verifications recorded yet.</p> : (
+          <ul style={styles.list}>
+            {sortedProofs.map(proof => (
+              <li key={proof.contractId} style={styles.listItem}>
+                <p><strong>User:</strong> {proof.payload.holder}</p>
+                <p><strong>Verified At:</strong> {new Date(proof.payload.verifiedAt).toLocaleString()}</p>
+              </li>
+            ))}
+          </ul>
+        )
+      )}
+    </div>
+  );
+};
+
+
+// --- Inline Styles ---
+
+const styles: { [key: string]: React.CSSProperties } = {
+  appContainer: {
+    fontFamily: "'Segoe UI', Tahoma, Geneva, Verdana, sans-serif",
+    maxWidth: '900px',
+    margin: '0 auto',
+    padding: '20px',
+    color: '#333',
+  },
+  header: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingBottom: '20px',
+    borderBottom: '1px solid #eee',
+  },
+  headerTitle: {
+    margin: 0,
+    color: '#003b5c',
+  },
+  logoutButton: {
+    padding: '8px 16px',
+    backgroundColor: '#f44336',
+    color: 'white',
+    border: 'none',
+    borderRadius: '4px',
+    cursor: 'pointer',
+    fontSize: '14px',
+  },
+  mainContent: {
+    paddingTop: '20px',
+  },
+  loginContainer: {
+    textAlign: 'center',
+    padding: '40px 0',
+  },
+  loginTitle: {
+    marginBottom: '30px',
+  },
+  loginButtons: {
+    display: 'flex',
+    justifyContent: 'center',
+    gap: '20px',
+  },
+  loggedInInfo: {
+    marginBottom: '20px',
+    padding: '10px',
+    backgroundColor: '#e7f3fe',
+    borderLeft: '4px solid #2196F3',
+  },
+  viewTitle: {
+    color: '#003b5c',
+    borderBottom: '2px solid #003b5c',
+    paddingBottom: '5px',
+    marginBottom: '20px',
+  },
+  list: {
+    listStyleType: 'none',
+    padding: 0,
+  },
+  listItem: {
+    padding: '15px',
+    border: '1px solid #ddd',
+    borderRadius: '4px',
+    marginBottom: '10px',
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  button: {
+    padding: '10px 20px',
+    fontSize: '16px',
+    cursor: 'pointer',
+    border: 'none',
+    borderRadius: '5px',
+    backgroundColor: '#2196F3',
+    color: 'white',
+    transition: 'background-color 0.2s',
+  },
+  buttonGroup: {
+    display: 'flex',
+    gap: '10px',
+  },
+  buttonSuccess: {
+    backgroundColor: '#4CAF50',
+  },
+  buttonDanger: {
+    backgroundColor: '#f44336',
+  },
+  hr: {
+    margin: '30px 0',
+    border: 'none',
+    borderTop: '1px solid #eee',
+  },
+  form: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '15px',
+    marginBottom: '20px',
+  },
+  formGroup: {
+    display: 'flex',
+    flexDirection: 'column',
+  },
+  label: {
+    marginBottom: '5px',
+    fontWeight: 'bold',
+  },
+  input: {
+    padding: '10px',
+    fontSize: '16px',
+    border: '1px solid #ccc',
+    borderRadius: '4px',
+  },
 };
 
 export default App;
