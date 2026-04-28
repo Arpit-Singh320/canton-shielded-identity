@@ -9,38 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Support for credential revocation by the issuer.
-- Daml Triggers to automate credential renewal notifications.
+- `Revoked` status on the frontend to reflect a credential's state accurately.
 
 ### Changed
-- Migrated frontend components to use the `@c7/ledger` and `@c7/react` libraries.
-- Upgraded project to Canton SDK 3.4.0.
+- Refined Daml Script tests to cover edge cases like duplicate verification requests.
 
----
-
-## [0.1.0] - 2024-05-21
+## [0.1.0] - 2024-10-26
 
 ### Added
-- **Initial Release:** First version of the Canton Shielded Identity protocol.
-- **Daml Models:**
-  - `Credential.Role.IssuerRole`: Contract granting a party (e.g., a bank) the authority to issue KYC credentials.
-  - `Credential.Request.CredentialRequest`: A user's request to an issuer for a new KYC credential.
-  - `Credential.V1.Credential`: The core, non-transferable KYC credential contract held by the end-user.
-  - `Verification.V1.VerificationRequest`: A request from a dApp (Verifier) to a user to present their KYC credential for verification.
-  - `Verification.V1.VerificationReceipt`: A confirmation that a user has successfully passed a verification check, observable by the Verifier.
-- **Daml Script Tests:**
-  - `Main.daml`: Comprehensive script tests covering the full lifecycle:
-    - Issuer onboarding and role creation.
-    - User requests and issuer acceptance/issuance of a credential.
-    - Verifier requests and user acceptance of a verification check.
-- **Frontend Application:**
-  - A basic React application to demonstrate the user's perspective.
-  - `App.tsx`: Main application container.
-  - `CredentialStatus.tsx`: Component to display the status of a user's active KYC credential.
-- **CI/CD:**
-  - GitHub Actions workflow (`.github/workflows/ci.yml`) to build and test the Daml contracts on every push and pull request.
-- **Documentation:**
-  - `docs/ISSUER_GUIDE.md`: Guide for financial institutions or other entities on how to become a credential issuer on the network.
-  - `docs/VERIFIER_GUIDE.md`: Guide for dApp developers on how to integrate the shielded identity protocol to verify users.
-- **Project Configuration:**
-  - `daml.yaml` defining the project structure and dependencies.
-  - `.gitignore` for a standard Canton/Daml project.
+- **Daml Models**: Initial smart contracts for the shielded identity lifecycle.
+  - `Kyc.IssuerRole`: Contract establishing an entity (e.g., a bank) as a trusted credential issuer.
+  - `Kyc.CredentialRequest`: A user can request a KYC credential from a registered `Issuer`.
+  - `Kyc.Credential`: The issued ZK-enabled credential, held by the user and known only to the user and issuer.
+  - `Kyc.VerificationRequest`: A verifier (e.g., a dApp) can request proof of a valid credential from a user.
+  - `Kyc.VerifiedReceipt`: A receipt confirming successful verification for a specific dApp, without revealing the issuer or user's PII.
+- **Daml Scripts**: Test suite covering the happy path:
+  - Issuer setup.
+  - User requests a credential.
+  - Issuer approves and issues the credential.
+  - Verifier requests verification.
+  - User approves the verification request, generating a `VerifiedReceipt`.
+- **Frontend**: A basic React application (`@c7/react`) for users to:
+  - View their active KYC credential.
+  - See and approve incoming verification requests.
+  - See a list of `VerifiedReceipt` contracts.
+- **Documentation**:
+  - `docs/ISSUER_GUIDE.md`: Guide for institutions on becoming credential issuers.
+  - `docs/VERIFIER_GUIDE.md`: Guide for dApps on integrating the shielded KYC check.
+- **CI/CD**: GitHub Actions workflow to build and test the Daml code on every push.
+- Initial `daml.yaml` project configuration and `.gitignore`.
